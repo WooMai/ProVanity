@@ -85,7 +85,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Set up CUDA toolkit
-        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        uses: WooMai/setup-cuda@master
         with:
           cuda: ${{ env.CUDA_VERSION }}
           method: network
