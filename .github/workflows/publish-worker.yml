@@ -137,6 +137,11 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Ensure npm supports OIDC
+        run: |
+          npm install -g npm@latest
+          npm -v
+
       - name: Resolve npm dist tag
         id: npm-tag
         shell: bash
@@ -162,4 +167,4 @@ jobs:
             exit 0
           fi
 
-          (cd npm/worker-linux-x64 && npm publish --access public --tag "$NPM_TAG")
+          (cd npm/worker-linux-x64 && npm publish --access public --tag "$NPM_TAG" --loglevel verbose)
