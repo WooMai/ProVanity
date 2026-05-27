@@ -1,0 +1,32 @@
+{
+  "name": "@provanity/worker-linux-x64",
+  "version": "1.0.0",
+  "description": "Linux x64 provanity-worker standalone binary for external automation",
+  "license": "MIT",
+  "author": "WooMai",
+  "homepage": "https://github.com/WooMai/ProVanity#readme",
+  "bugs": {
+    "url": "https://github.com/WooMai/ProVanity/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WooMai/ProVanity.git",
+    "directory": "npm/worker-linux-x64"
+  },
+  "bin": {
+    "provanity-worker": "bin/provanity-worker"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "README.md"
+  ]
+}

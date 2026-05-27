@@ -1,0 +1,8 @@
+{
+  "name": "provanity-workspace",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "pack:npm": "pnpm --filter ./npm/provanity pack && pnpm --filter ./npm/cli-linux-x64 pack && pnpm --filter ./npm/cli-win32-x64 pack && pnpm --filter ./npm/worker-linux-x64 pack"
+  }
+}

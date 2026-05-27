@@ -1,0 +1,165 @@
+name: publish worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "publish version, for example 1.0.1"
+        required: true
+        type: string
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-version:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      release-sha: ${{ steps.release-sha.outputs.sha }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Refuse tag dispatches
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" != "branch" ]]; then
+            echo "Publishing workflows must run from a branch, not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+
+      - name: Sync worker package version
+        run: node scripts/sync-npm-version.mjs worker "${RELEASE_VERSION}"
+
+      - name: Commit version changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- npm/worker-linux-x64/package.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add npm/worker-linux-x64/package.json
+            git commit -m "chore(npm): release worker ${RELEASE_VERSION#v}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "Worker package version already matches ${RELEASE_VERSION}."
+          fi
+
+      - name: Record release commit
+        id: release-sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-and-publish:
+    runs-on: ubuntu-22.04
+    needs: prepare-version
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      CUDA_VERSION: "13.2.0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.release-sha }}
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up CUDA toolkit
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+
+      - name: Show CUDA compiler targets
+        run: |
+          nvcc --version
+          nvcc --list-gpu-code
+
+      - name: Build CUDA backend
+        env:
+          ARCH: all
+          EMBED: "1"
+        run: sh scripts/build-cuda-backend.sh
+
+      - name: Test
+        run: go test -tags cudaembed ./...
+
+      - name: Build Linux worker binary
+        run: |
+          mkdir -p npm/worker-linux-x64/bin
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags cudaembed -trimpath -ldflags "-s -w -X github.com/woomai/provanity/internal/worker.Version=${RELEASE_VERSION}" -o npm/worker-linux-x64/bin/provanity-worker ./cmd/provanity-worker
+          chmod 755 npm/worker-linux-x64/bin/provanity-worker
+          npm/worker-linux-x64/bin/provanity-worker --help >/dev/null
+
+      - name: Prepare GitHub Release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          cp npm/worker-linux-x64/bin/provanity-worker "dist/release/provanity-worker-linux-amd64"
+          chmod 755 "dist/release/provanity-worker-linux-amd64"
+          (cd dist/release && sha256sum "provanity-worker-linux-amd64" > "SHA256SUMS")
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: worker-${{ env.RELEASE_VERSION }}
+          target_commitish: ${{ needs.prepare-version.outputs.release-sha }}
+          make_latest: false
+          files: |
+            dist/release/provanity-worker-linux-amd64
+            dist/release/SHA256SUMS
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Resolve npm dist tag
+        id: npm-tag
+        shell: bash
+        run: |
+          version="${RELEASE_VERSION#v}"
+          if [[ "$version" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish worker package
+        shell: bash
+        env:
+          NPM_TAG: ${{ steps.npm-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          package_name="$(node -e "console.log(require('./npm/worker-linux-x64/package.json').name)")"
+
+          if npm view "${package_name}@${version}" version >/dev/null 2>&1; then
+            echo "${package_name}@${version} already exists; skipping."
+            exit 0
+          fi
+
+          (cd npm/worker-linux-x64 && npm publish --access public --tag "$NPM_TAG")

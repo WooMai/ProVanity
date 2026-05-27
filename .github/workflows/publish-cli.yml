@@ -1,0 +1,260 @@
+name: publish cli
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "publish version, for example 1.0.1"
+        required: true
+        type: string
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-version:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      release-sha: ${{ steps.release-sha.outputs.sha }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Refuse tag dispatches
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" != "branch" ]]; then
+            echo "Publishing workflows must run from a branch, not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+
+      - name: Sync CLI package versions
+        run: node scripts/sync-npm-version.mjs cli "${RELEASE_VERSION}"
+
+      - name: Commit version changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- npm/provanity/package.json npm/cli-linux-x64/package.json npm/cli-win32-x64/package.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add npm/provanity/package.json npm/cli-linux-x64/package.json npm/cli-win32-x64/package.json
+            git commit -m "chore(npm): release cli ${RELEASE_VERSION#v}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "CLI package versions already match ${RELEASE_VERSION}."
+          fi
+
+      - name: Record release commit
+        id: release-sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    needs: prepare-version
+    env:
+      CUDA_VERSION: "13.2.0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.release-sha }}
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up CUDA toolkit
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+
+      - name: Show CUDA compiler targets
+        run: |
+          nvcc --version
+          nvcc --list-gpu-code
+
+      - name: Build CUDA backend
+        env:
+          ARCH: all
+          EMBED: "1"
+        run: sh scripts/build-cuda-backend.sh
+
+      - name: Test
+        run: go test -tags cudaembed ./...
+
+      - name: Build Linux CLI binary
+        run: |
+          mkdir -p npm/cli-linux-x64/bin
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags cudaembed -trimpath -ldflags "-s -w -X github.com/woomai/provanity/internal/cli.version=${RELEASE_VERSION}" -o npm/cli-linux-x64/bin/provanity ./cmd/provanity
+          chmod 755 npm/cli-linux-x64/bin/provanity
+          npm/cli-linux-x64/bin/provanity --help >/dev/null
+
+      - name: Upload Linux CLI binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-cli-linux-x64-bin
+          if-no-files-found: error
+          path: npm/cli-linux-x64/bin/provanity
+
+  build-windows:
+    runs-on: windows-2025
+    needs: prepare-version
+    env:
+      CUDA_VERSION: "13.2.0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.release-sha }}
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up CUDA toolkit
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+
+      - name: Show CUDA compiler targets
+        run: |
+          nvcc --version
+          nvcc --list-gpu-code
+
+      - name: Build CUDA backend
+        run: .\scripts\build-cuda-backend.ps1 -Arch all
+
+      - name: Test
+        run: go test -tags cudaembed ./...
+
+      - name: Build Windows CLI binary
+        run: |
+          New-Item -ItemType Directory -Force -Path npm\cli-win32-x64\bin | Out-Null
+          $LdFlags = "-s -w -X github.com/woomai/provanity/internal/cli.version=${env:RELEASE_VERSION}"
+          go build -tags cudaembed -trimpath -ldflags $LdFlags -o npm\cli-win32-x64\bin\provanity.exe ./cmd/provanity
+          .\npm\cli-win32-x64\bin\provanity.exe --help | Out-Null
+
+      - name: Upload Windows CLI binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-cli-win32-x64-bin
+          if-no-files-found: error
+          path: npm/cli-win32-x64/bin/provanity.exe
+
+  publish:
+    runs-on: ubuntu-22.04
+    needs:
+      - prepare-version
+      - build-linux
+      - build-windows
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.release-sha }}
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Download Linux CLI binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-cli-linux-x64-bin
+          path: npm/cli-linux-x64/bin
+
+      - name: Download Windows CLI binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-cli-win32-x64-bin
+          path: npm/cli-win32-x64/bin
+
+      - name: Prepare binaries
+        run: chmod 755 npm/cli-linux-x64/bin/provanity
+
+      - name: Prepare GitHub Release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          cp npm/cli-linux-x64/bin/provanity "dist/release/provanity-linux-amd64"
+          cp npm/cli-win32-x64/bin/provanity.exe "dist/release/provanity-windows-amd64.exe"
+          chmod 755 "dist/release/provanity-linux-amd64"
+          (cd dist/release && sha256sum "provanity-linux-amd64" "provanity-windows-amd64.exe" > "SHA256SUMS")
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ env.RELEASE_VERSION }}
+          target_commitish: ${{ needs.prepare-version.outputs.release-sha }}
+          make_latest: true
+          files: |
+            dist/release/provanity-linux-amd64
+            dist/release/provanity-windows-amd64.exe
+            dist/release/SHA256SUMS
+
+      - name: Resolve npm dist tag
+        id: npm-tag
+        shell: bash
+        run: |
+          version="${RELEASE_VERSION#v}"
+          if [[ "$version" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish CLI packages
+        shell: bash
+        env:
+          NPM_TAG: ${{ steps.npm-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+
+          publish_package() {
+            local package_dir="$1"
+            local package_name
+            package_name="$(node -e "console.log(require('./${package_dir}/package.json').name)")"
+
+            if npm view "${package_name}@${version}" version >/dev/null 2>&1; then
+              echo "${package_name}@${version} already exists; skipping."
+              return
+            fi
+
+            (cd "$package_dir" && npm publish --access public --tag "$NPM_TAG")
+          }
+
+          publish_package npm/cli-linux-x64
+          publish_package npm/cli-win32-x64
+          publish_package npm/provanity

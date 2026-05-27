@@ -1,0 +1,43 @@
+{
+  "name": "provanity",
+  "version": "1.0.0",
+  "description": "EVM and Tron vanity wallet generator powered by CUDA",
+  "license": "MIT",
+  "author": "WooMai",
+  "keywords": [
+    "ethereum",
+    "vanity",
+    "address",
+    "cuda",
+    "gpu",
+    "crypto"
+  ],
+  "homepage": "https://github.com/WooMai/ProVanity#readme",
+  "bugs": {
+    "url": "https://github.com/WooMai/ProVanity/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WooMai/ProVanity.git",
+    "directory": "npm/provanity"
+  },
+  "bin": {
+    "provanity": "bin/provanity.js"
+  },
+  "files": [
+    "bin",
+    "install.js",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node ../../scripts/copy-npm-readme.mjs .",
+    "postinstall": "node install.js"
+  },
+  "optionalDependencies": {
+    "@provanity/cli-linux-x64": "1.0.0",
+    "@provanity/cli-win32-x64": "1.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

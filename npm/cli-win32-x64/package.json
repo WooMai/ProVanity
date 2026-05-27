@@ -1,0 +1,29 @@
+{
+  "name": "@provanity/cli-win32-x64",
+  "version": "1.0.0",
+  "description": "Windows x64 provanity binary",
+  "license": "MIT",
+  "author": "WooMai",
+  "homepage": "https://github.com/WooMai/ProVanity#readme",
+  "bugs": {
+    "url": "https://github.com/WooMai/ProVanity/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WooMai/ProVanity.git",
+    "directory": "npm/cli-win32-x64"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "README.md"
+  ]
+}
