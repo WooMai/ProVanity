@@ -13,33 +13,13 @@ This project is inspired by [profanity](https://github.com/johguse/profanity) an
 - Standalone headless worker binary for automation; use its `--help` output for
   the worker interface.
 
-## Performance
-
-> 3-minute sustained `--benchmark` runs against an unreachable target (EVM), all on headless Linux (no display compositor sharing the GPU). profanity2 measured from [`1inch/profanity2@13d16e8`](https://github.com/1inch/profanity2/commit/13d16e83).
-
-| GPU | Architecture | ProVanity | profanity2 | Speedup |
-|:---|:---|---:|---:|---:|
-| RTX PRO 6000 Blackwell Server Edition | Blackwell `sm_120` | 3,437 MH/s | 1,950 MH/s | **+76%** |
-| RTX 5090                              | Blackwell `sm_120` | 3,268 MH/s | 2,089 MH/s | **+56%** |
-| RTX 4090                              | Ada `sm_89`        | 2,224 MH/s | 1,393 MH/s | **+60%** |
-| H100 SXM                              | Hopper `sm_90`     | 2,113 MH/s | 1,393 MH/s | **+52%** |
-| RTX 4070 Ti SUPER                     | Ada `sm_89`        | 1,299 MH/s |   836 MH/s | **+55%** |
-| RTX 3090                              | Ampere `sm_86`     | 1,073 MH/s |   696 MH/s | **+54%** |
-| RTX 3080                              | Ampere `sm_86`     | 1,026 MH/s |   696 MH/s | **+47%** |
-| RTX 3060 Ti                           | Ampere `sm_86`     |   531 MH/s |   348 MH/s | **+53%** |
-| RTX 3060                              | Ampere `sm_86`     |   405 MH/s |   264 MH/s | **+53%** |
-| RTX 2080 Ti                           | Turing `sm_75`     |   760 MH/s |   464 MH/s | **+64%** |
-| GTX 1660 Super                        | Turing `sm_75`     |   267 MH/s |   199 MH/s | **+34%** |
-
-The speedup is largest on Ampere and newer (`sm_86`+), where provanity's batched-inversion + coalesced SoA layout fully amortizes. Turing (`sm_75`) sees a narrower margin where SM count and memory bandwidth dominate.
-
 ## Requirements
 
 - Windows x64 or Linux x64.
-- NVIDIA GPU: Turing (`sm_75`) or newer. e.g. GTX 16-series, any RTX, T4, A100, H100, etc. Pascal and older (GTX 10-series, Titan X(p), Tesla M40/K80) are not supported — use [1inch/profanity2](https://github.com/1inch/profanity2) on those GPUs.
+- NVIDIA GPU: Turing (`sm_75`) or newer. e.g. GTX 16-series, any RTX, T4, A100, H100, etc.
 - NVIDIA Driver: >= 580.65 on Linux, >= 580.88 on Windows (CUDA 13.x baseline, Aug 2025+). Latest drivers are always recommended for best performance.
 
-Prebuilt binaries embed the CUDA backend, so running a release binary does not require installing the CUDA Toolkit on the target machine.
+> Pascal and older (GTX 9xx, GTX 10xx, Titan X(p), Tesla M40/K80, etc.) are not supported — use [1inch/profanity2](https://github.com/1inch/profanity2) on those GPUs.
 
 ## Quickstart
 
@@ -99,6 +79,24 @@ ProVanity generates crypto wallet private keys. Before using it with any real fu
 Always verify that the generated private key derives to the expected address before moving or receiving any funds.
 
 You are fully responsible for the security of your machine, runtime environment, generated keys, and any funds controlled by those keys. Use this tool only if you accept those risks.
+
+## Performance
+
+> 3-minute sustained `--benchmark` runs against an unreachable target (EVM), all on headless Linux (no display compositor sharing the GPU). profanity2 measured from [`1inch/profanity2@13d16e8`](https://github.com/1inch/profanity2/commit/13d16e83).
+
+| GPU | Architecture | ProVanity | profanity2 | Speedup |
+|:---|:---|---:|---:|---:|
+| RTX PRO 6000 Blackwell Server Edition | Blackwell `sm_120` | 3,437 MH/s | 1,950 MH/s | **+76%** |
+| RTX 5090                              | Blackwell `sm_120` | 3,268 MH/s | 2,089 MH/s | **+56%** |
+| RTX 4090                              | Ada `sm_89`        | 2,224 MH/s | 1,393 MH/s | **+60%** |
+| H100 SXM                              | Hopper `sm_90`     | 2,113 MH/s | 1,393 MH/s | **+52%** |
+| RTX 4070 Ti SUPER                     | Ada `sm_89`        | 1,299 MH/s |   836 MH/s | **+55%** |
+| RTX 3090                              | Ampere `sm_86`     | 1,073 MH/s |   696 MH/s | **+54%** |
+| RTX 3080                              | Ampere `sm_86`     | 1,026 MH/s |   696 MH/s | **+47%** |
+| RTX 3060 Ti                           | Ampere `sm_86`     |   531 MH/s |   348 MH/s | **+53%** |
+| RTX 3060                              | Ampere `sm_86`     |   405 MH/s |   264 MH/s | **+53%** |
+| RTX 2080 Ti                           | Turing `sm_75`     |   760 MH/s |   464 MH/s | **+64%** |
+| GTX 1660 Super                        | Turing `sm_75`     |   267 MH/s |   199 MH/s | **+34%** |
 
 ## License
 
