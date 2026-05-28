@@ -1,6 +1,6 @@
 {
   "name": "@provanity/worker-linux-x64",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Linux x64 provanity-worker standalone binary for external automation",
   "license": "MIT",
   "author": "WooMai",
