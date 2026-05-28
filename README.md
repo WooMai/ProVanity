@@ -76,10 +76,11 @@ provanity generate --pattern leading:0:8
 provanity generate --pattern pattern:deadXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXbeef
 ```
 
-Generate a Tron vanity wallet:
+Generate a Tron vanity wallet (prefix or suffix; the leading "T" is implicit):
 
 ```bash
-provanity generate-tron --pattern pattern:TABC  # Pattern must start with "T"
+provanity generate-tron --pattern prefix:ABC  # address starts with TABC…
+provanity generate-tron --pattern suffix:xyz  # address ends with …xyz
 ```
 
 Run benchmark:

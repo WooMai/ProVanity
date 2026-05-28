@@ -89,7 +89,7 @@ func Probability(pattern vanity.Pattern) (float64, error) {
 	switch pattern.Kind {
 	case vanity.PatternPattern, vanity.PatternLeading:
 		return math.Pow(16, -float64(pattern.Count)), nil
-	case vanity.PatternTronPattern:
+	case vanity.PatternTronPrefix, vanity.PatternTronSuffix:
 		return math.Pow(58, -float64(pattern.Count)), nil
 	default:
 		return 0, fmt.Errorf("unsupported pattern kind %q", pattern.Kind)

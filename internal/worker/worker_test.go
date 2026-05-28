@@ -63,12 +63,12 @@ func TestWorkerLocalModeResultIncludesPrivateKey(t *testing.T) {
 }
 
 func TestWorkerTronModeUsesTronWalletAndPattern(t *testing.T) {
-	stdout, stderr, err := executeCommand(t, []string{"--mode", "tron", "--pattern", "pattern:TABC"}, "", func(ctx context.Context, opts local.Options, emit local.EmitFunc) (local.Result, error) {
+	stdout, stderr, err := executeCommand(t, []string{"--mode", "tron", "--pattern", "prefix:ABC"}, "", func(ctx context.Context, opts local.Options, emit local.EmitFunc) (local.Result, error) {
 		if opts.Wallet != local.WalletTron {
 			t.Fatalf("Wallet = %q, want %q", opts.Wallet, local.WalletTron)
 		}
-		if opts.Pattern.Kind != vanity.PatternTronPattern {
-			t.Fatalf("Pattern.Kind = %q, want %q", opts.Pattern.Kind, vanity.PatternTronPattern)
+		if opts.Pattern.Kind != vanity.PatternTronPrefix {
+			t.Fatalf("Pattern.Kind = %q, want %q", opts.Pattern.Kind, vanity.PatternTronPrefix)
 		}
 		emit(local.RunEvent{Candidate: &local.Candidate{
 			Address:     "TABC111111111111111111111111111111",

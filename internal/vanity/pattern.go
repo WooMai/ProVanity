@@ -9,9 +9,37 @@ import (
 type PatternKind string
 
 const (
-	PatternPattern     PatternKind = "pattern"
-	PatternLeading     PatternKind = "leading"
-	PatternTronPattern PatternKind = "tron-pattern"
+	PatternPattern    PatternKind = "pattern"
+	PatternLeading    PatternKind = "leading"
+	PatternTronPrefix PatternKind = "tron-prefix"
+	PatternTronSuffix PatternKind = "tron-suffix"
+)
+
+// MaxTronConcretePos is the largest number of characters a Tron prefix may pin
+// after the leading 'T' (which is implicit). The Tron address is 34 base58
+// characters and the 4-byte base58check checksum (value < 2^32 < 58^6) only
+// perturbs the last ~6 characters (indices 27..33). Capping the prefix well
+// inside that boundary lets the CUDA scorer match the address prefix with a
+// 160-bit address-range compare and no checksum (no SHA-256); see
+// crypto.TronPrefixLadder and PROVANITY_CUDA_MODE_TRON_PREFIX.
+const MaxTronConcretePos = 16
+
+// MaxTronSuffixLen caps a Tron suffix so the device can compute value mod 58^N
+// in a single 64-bit Horner reduction (58^9 still fits a uint64). Covers every
+// realistic vanity suffix; see PROVANITY_CUDA_MODE_TRON_SUFFIX.
+const MaxTronSuffixLen = 8
+
+// tronAddrMin and tronAddrMax are the smallest and largest possible Tron
+// addresses: base58check(0x41 || 0x00*20) and base58check(0x41 || 0xff*20).
+// Every 20-byte EVM address is reachable, so all valid Tron addresses sort, as
+// equal-length base58 strings, within [tronAddrMin, tronAddrMax]. The base58
+// alphabet is ASCII-ascending, so byte-wise string comparison matches numeric
+// order. TestTronAddressRangeConstants guards these against
+// crypto.TronAddressFromEVMAddress.
+const (
+	tronAddrMin = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+	tronAddrMax = "TZJozAg1ruapycCicgz31GxvYJ1FraLjZa"
+	tronAddrLen = 34
 )
 
 type Pattern struct {
@@ -53,10 +81,14 @@ func ParseTronPattern(raw string) (Pattern, error) {
 	if !hasValue {
 		return Pattern{}, fmt.Errorf("unsupported Tron pattern %q", raw)
 	}
-	if strings.ToLower(strings.TrimSpace(name)) != "pattern" {
-		return Pattern{}, fmt.Errorf("Tron only supports pattern:VALUE")
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "prefix":
+		return parseTronPrefix(raw, value)
+	case "suffix":
+		return parseTronSuffix(raw, value)
+	default:
+		return Pattern{}, fmt.Errorf("Tron supports prefix:VALUE or suffix:VALUE")
 	}
-	return parseTronPattern(raw, value)
 }
 
 func (p Pattern) MatchesAddressHex(address string) bool {
@@ -90,8 +122,10 @@ func (p Pattern) MatchesAddressHex(address string) bool {
 
 func (p Pattern) MatchesAddress(address string) bool {
 	switch p.Kind {
-	case PatternTronPattern:
-		return p.matchesTronAddress(address)
+	case PatternTronPrefix:
+		return strings.HasPrefix(strings.TrimSpace(address), p.Value)
+	case PatternTronSuffix:
+		return strings.HasSuffix(strings.TrimSpace(address), p.Value)
 	default:
 		return p.MatchesAddressHex(address)
 	}
@@ -129,8 +163,10 @@ func (p Pattern) ScoreAddressHex(address string) int {
 
 func (p Pattern) ScoreAddress(address string) int {
 	switch p.Kind {
-	case PatternTronPattern:
-		return p.scoreTronAddress(address)
+	case PatternTronPrefix:
+		return p.scoreTronPrefix(address)
+	case PatternTronSuffix:
+		return p.scoreTronSuffix(address)
 	default:
 		return p.ScoreAddressHex(address)
 	}
@@ -138,7 +174,7 @@ func (p Pattern) ScoreAddress(address string) int {
 
 func (p Pattern) TargetScore() int {
 	switch p.Kind {
-	case PatternPattern, PatternLeading, PatternTronPattern:
+	case PatternPattern, PatternLeading, PatternTronPrefix, PatternTronSuffix:
 		return p.Count
 	default:
 		return 0
@@ -192,48 +228,59 @@ func parsePattern(raw, value string) (Pattern, error) {
 	}, nil
 }
 
-func parseTronPattern(raw, value string) (Pattern, error) {
+// parseTronPrefix parses prefix:VALUE, where VALUE is the base58 characters that
+// follow the implicit leading 'T'. A single leading 'T' in VALUE is tolerated
+// and stripped so both prefix:ABC and prefix:TABC mean the address "TABC…".
+func parseTronPrefix(raw, value string) (Pattern, error) {
 	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "T")
 	if value == "" {
-		return Pattern{}, fmt.Errorf("Tron pattern value is empty")
+		return Pattern{}, fmt.Errorf("Tron prefix must include at least one character after the implicit leading T")
 	}
-	if len(value) > 34 {
-		return Pattern{}, fmt.Errorf("Tron pattern value cannot exceed 34 characters")
+	if len(value) > MaxTronConcretePos {
+		return Pattern{}, fmt.Errorf("Tron prefix cannot exceed %d characters after T", MaxTronConcretePos)
 	}
-	if value[0] != 'T' {
-		return Pattern{}, fmt.Errorf("Tron pattern must start with T")
-	}
-
-	var normalized strings.Builder
-	concrete := 0
 	for i := 0; i < len(value); i++ {
-		ch := value[i]
-		switch {
-		case ch == '*' || ch == '?':
-			if i == 0 {
-				return Pattern{}, fmt.Errorf("Tron pattern must start with T")
-			}
-			normalized.WriteByte('?')
-		case isBase58Byte(ch):
-			normalized.WriteByte(ch)
-			if i > 0 {
-				concrete++
-			}
-		default:
-			return Pattern{}, fmt.Errorf("Tron pattern value must contain only Base58 characters or * / ? wildcards")
+		if !isBase58Byte(value[i]) {
+			return Pattern{}, fmt.Errorf("Tron prefix must contain only Base58 characters")
 		}
 	}
-	if concrete == 0 {
-		return Pattern{}, fmt.Errorf("Tron pattern must include at least one concrete character after T")
+	full := "T" + value
+	if !tronPrefixReachable(full) {
+		return Pattern{}, fmt.Errorf("Tron prefix %q is not a reachable address prefix (valid addresses range from %s to %s)", full, tronAddrMin, tronAddrMax)
 	}
-
-	value = normalized.String()
 	return Pattern{
 		Raw:         raw,
-		Kind:        PatternTronPattern,
+		Kind:        PatternTronPrefix,
+		Value:       full,
+		Count:       len(value),
+		Description: "prefix:" + value,
+	}, nil
+}
+
+// parseTronSuffix parses suffix:VALUE, where VALUE is the trailing base58
+// characters of the address. Suffixes are checksum-dependent, so the device
+// computes the real base58check tail per candidate; the length cap keeps that a
+// single 64-bit modular reduction (see MaxTronSuffixLen).
+func parseTronSuffix(raw, value string) (Pattern, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return Pattern{}, fmt.Errorf("Tron suffix value is empty")
+	}
+	if len(value) > MaxTronSuffixLen {
+		return Pattern{}, fmt.Errorf("Tron suffix cannot exceed %d characters", MaxTronSuffixLen)
+	}
+	for i := 0; i < len(value); i++ {
+		if !isBase58Byte(value[i]) {
+			return Pattern{}, fmt.Errorf("Tron suffix must contain only Base58 characters")
+		}
+	}
+	return Pattern{
+		Raw:         raw,
+		Kind:        PatternTronSuffix,
 		Value:       value,
-		Count:       concrete,
-		Description: "pattern:" + value,
+		Count:       len(value),
+		Description: "suffix:" + value,
 	}, nil
 }
 
@@ -278,37 +325,34 @@ func normalizeAddressHex(address string) string {
 	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(address)), "0x")
 }
 
-func (p Pattern) matchesTronAddress(address string) bool {
+// scoreTronPrefix returns the number of leading characters after the implicit
+// 'T' that match, stopping at the first mismatch (the longest matching prefix
+// run). p.Value is "T"+concrete prefix, so scoring starts at index 1.
+func (p Pattern) scoreTronPrefix(address string) int {
 	address = strings.TrimSpace(address)
-	if len(address) < len(p.Value) {
-		return false
-	}
-	for i := 0; i < len(p.Value); i++ {
-		want := p.Value[i]
-		if want == '?' {
-			continue
-		}
-		if address[i] != want {
-			return false
-		}
-	}
-	return true
-}
-
-func (p Pattern) scoreTronAddress(address string) int {
-	address = strings.TrimSpace(address)
-	if len(address) < len(p.Value) {
-		return 0
-	}
 	matched := 0
 	for i := 1; i < len(p.Value); i++ {
-		want := p.Value[i]
-		if want == '?' {
-			continue
+		if i >= len(address) || address[i] != p.Value[i] {
+			break
 		}
-		if address[i] == want {
-			matched++
+		matched++
+	}
+	return matched
+}
+
+// scoreTronSuffix returns the number of trailing characters that match, counting
+// from the end and stopping at the first mismatch (the longest matching suffix
+// run).
+func (p Pattern) scoreTronSuffix(address string) int {
+	address = strings.TrimSpace(address)
+	matched := 0
+	for i := 0; i < len(p.Value); i++ {
+		ai := len(address) - 1 - i
+		si := len(p.Value) - 1 - i
+		if ai < 0 || address[ai] != p.Value[si] {
+			break
 		}
+		matched++
 	}
 	return matched
 }
@@ -326,6 +370,28 @@ func countLeadingByte(value string, want byte) int {
 
 func isHexByte(ch byte) bool {
 	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+}
+
+// tronPrefixReachable reports whether some valid Tron address matches the
+// normalized pattern (concrete characters fixed, '?' wildcards free). It pads
+// the pattern to a full 34-char address, fills wildcard/unset positions with
+// the smallest ('1') and largest ('z') base58 characters to bracket the
+// matching set, and tests that bracket against [tronAddrMin, tronAddrMax]. This
+// is exact for prefix patterns (a contiguous range) and conservative for
+// interior-wildcard patterns: it never rejects a reachable pattern.
+func tronPrefixReachable(value string) bool {
+	const minChar, maxChar = '1', 'z'
+	var lo, hi [tronAddrLen]byte
+	for i := 0; i < tronAddrLen; i++ {
+		if i < len(value) && value[i] != '?' {
+			lo[i] = value[i]
+			hi[i] = value[i]
+			continue
+		}
+		lo[i] = minChar
+		hi[i] = maxChar
+	}
+	return string(lo[:]) <= tronAddrMax && string(hi[:]) >= tronAddrMin
 }
 
 func isBase58Byte(ch byte) bool {

@@ -398,6 +398,16 @@ namespace
 			return false;
 		if (!check_cuda(cudaMemcpyToSymbol(g_pattern, config->pattern, PROVANITY_CUDA_PATTERN_LEN), "cudaMemcpyToSymbol(g_pattern)", error))
 			return false;
+		if (!check_cuda(cudaMemcpyToSymbol(g_tron_prefix_ladder, config->tron_prefix_ladder, PROVANITY_CUDA_TRON_PREFIX_LADDER_LEN), "cudaMemcpyToSymbol(g_tron_prefix_ladder)", error))
+			return false;
+		if (!check_cuda(cudaMemcpyToSymbol(g_tron_prefix_levels, &config->tron_prefix_levels, sizeof(config->tron_prefix_levels)), "cudaMemcpyToSymbol(g_tron_prefix_levels)", error))
+			return false;
+		if (!check_cuda(cudaMemcpyToSymbol(g_tron_suffix_digits, config->tron_suffix_digits, PROVANITY_CUDA_TRON_MAX_SUFFIX_LEN), "cudaMemcpyToSymbol(g_tron_suffix_digits)", error))
+			return false;
+		if (!check_cuda(cudaMemcpyToSymbol(g_tron_suffix_len, &config->tron_suffix_len, sizeof(config->tron_suffix_len)), "cudaMemcpyToSymbol(g_tron_suffix_len)", error))
+			return false;
+		if (!check_cuda(cudaMemcpyToSymbol(g_tron_suffix_mod, &config->tron_suffix_mod, sizeof(config->tron_suffix_mod)), "cudaMemcpyToSymbol(g_tron_suffix_mod)", error))
+			return false;
 		return true;
 	}
 
@@ -411,8 +421,11 @@ namespace
 		case PROVANITY_CUDA_MODE_PATTERN:
 			pv_score_pattern<<<grid, block, 0, stream>>>(mem.hashes, mem.results, score_max);
 			break;
-		case PROVANITY_CUDA_MODE_TRON_PATTERN:
-			pv_score_tron<<<grid, block, 0, stream>>>(mem.hashes, mem.results, score_max);
+		case PROVANITY_CUDA_MODE_TRON_PREFIX:
+			pv_score_tron_prefix<<<grid, block, 0, stream>>>(mem.hashes, mem.results, score_max);
+			break;
+		case PROVANITY_CUDA_MODE_TRON_SUFFIX:
+			pv_score_tron_suffix<<<grid, block, 0, stream>>>(mem.hashes, mem.results, score_max);
 			break;
 		default:
 			pv_score_leading<<<grid, block, 0, stream>>>(mem.hashes, mem.results, score_max);
@@ -433,8 +446,11 @@ namespace
 		case PROVANITY_CUDA_MODE_PATTERN:
 			pv_iterate_step_scored<ScoreOpPattern><<<grid, block, 0, stream>>>(mem.state_x, mem.state_lambda, mem.state_inv, mem.results, score_max);
 			break;
-		case PROVANITY_CUDA_MODE_TRON_PATTERN:
-			pv_iterate_step_scored<ScoreOpTron><<<grid, block, 0, stream>>>(mem.state_x, mem.state_lambda, mem.state_inv, mem.results, score_max);
+		case PROVANITY_CUDA_MODE_TRON_PREFIX:
+			pv_iterate_step_scored<ScoreOpTronPrefix><<<grid, block, 0, stream>>>(mem.state_x, mem.state_lambda, mem.state_inv, mem.results, score_max);
+			break;
+		case PROVANITY_CUDA_MODE_TRON_SUFFIX:
+			pv_iterate_step_scored<ScoreOpTronSuffix><<<grid, block, 0, stream>>>(mem.state_x, mem.state_lambda, mem.state_inv, mem.results, score_max);
 			break;
 		default:
 			pv_iterate_step_scored<ScoreOpLeading><<<grid, block, 0, stream>>>(mem.state_x, mem.state_lambda, mem.state_inv, mem.results, score_max);
@@ -564,7 +580,7 @@ PROVANITY_CUDA_API int32_t PROVANITY_CUDA_CALL provanity_cuda_version(char *vers
 	{
 		return -1;
 	}
-	copy_error(version, version_len, "provanity-cuda/2");
+	copy_error(version, version_len, "provanity-cuda/3");
 	return 0;
 }
 

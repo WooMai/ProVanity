@@ -51,7 +51,7 @@ func newGenerateTronCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&pattern, "pattern", "", "Tron Base58 pattern; must start with pattern:T, use * or ? as wildcards")
+	cmd.Flags().StringVar(&pattern, "pattern", "", "Tron Base58 target: prefix:ABC (address starts TABC…) or suffix:xyz (address ends …xyz)")
 	cmd.Flags().StringVar(&devices, "devices", "all", "comma-separated CUDA device ids or all")
 	cmd.Flags().BoolVar(&selectGPU, "select-gpu", false, "probe and choose GPU devices before starting")
 	return cmd

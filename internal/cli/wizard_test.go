@@ -89,9 +89,10 @@ func TestWizardArgsForGenerateWildcardPattern(t *testing.T) {
 	}
 }
 
-func TestWizardArgsForGenerateTronPattern(t *testing.T) {
+func TestWizardArgsForGenerateTronPrefix(t *testing.T) {
 	args, err := wizardArgsForMode("generate_tron", map[string]string{
-		"tron_pattern_value": "TA?X",
+		"tron_mode":         "prefix",
+		"tron_prefix_value": "ABC",
 	})
 	if err != nil {
 		t.Fatalf("wizardArgsForMode returned error: %v", err)
@@ -99,7 +100,26 @@ func TestWizardArgsForGenerateTronPattern(t *testing.T) {
 
 	want := []string{
 		"generate-tron",
-		"--pattern", "pattern:TA?X",
+		"--pattern", "prefix:ABC",
+		"--devices", "all",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestWizardArgsForGenerateTronSuffix(t *testing.T) {
+	args, err := wizardArgsForMode("generate_tron", map[string]string{
+		"tron_mode":         "suffix",
+		"tron_suffix_value": "xyz",
+	})
+	if err != nil {
+		t.Fatalf("wizardArgsForMode returned error: %v", err)
+	}
+
+	want := []string{
+		"generate-tron",
+		"--pattern", "suffix:xyz",
 		"--devices", "all",
 	}
 	if !reflect.DeepEqual(args, want) {
@@ -162,10 +182,79 @@ func wizardPress(model wizardModel, key tea.KeyType) wizardModel {
 	return updated.(wizardModel)
 }
 
+func wizardType(model wizardModel, s string) wizardModel {
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
+	return updated.(wizardModel)
+}
+
+func TestWizardTronModeViewShowsLiveExampleAndValidation(t *testing.T) {
+	model := newWizardModel()
+	model = wizardPress(model, tea.KeyDown)  // home: Generate EVM -> Generate Tron
+	model = wizardPress(model, tea.KeyEnter) // select Tron -> land on tron_mode field
+
+	if view := model.View(); !strings.Contains(view, "prefix:ABC") {
+		t.Fatalf("tron_mode view missing live prefix example:\n%s", view)
+	}
+	model = wizardPress(model, tea.KeyDown) // highlight suffix
+	if view := model.View(); !strings.Contains(view, "suffix:xyz") {
+		t.Fatalf("tron_mode view did not update example to suffix:\n%s", view)
+	}
+
+	model = wizardPress(model, tea.KeyUp)    // back to prefix
+	model = wizardPress(model, tea.KeyEnter) // select prefix -> tron_prefix_value field
+	model = wizardType(model, "0")           // '0' is not a Base58 character
+	if view := model.View(); !strings.Contains(view, "invalid") {
+		t.Fatalf("typing an invalid character did not surface a live error:\n%s", view)
+	}
+}
+
 func wizardModeLabels(modes []wizardMode) []string {
 	labels := make([]string, 0, len(modes))
 	for _, mode := range modes {
 		labels = append(labels, mode.label)
 	}
 	return labels
+}
+
+func tronFieldByKey(t *testing.T, key string) wizardField {
+	t.Helper()
+	for _, f := range tronPatternFields() {
+		if f.key == key {
+			return f
+		}
+	}
+	t.Fatalf("tron field %q not found", key)
+	return wizardField{}
+}
+
+func TestWizardTronModePreviewTracksChoice(t *testing.T) {
+	modeField := tronFieldByKey(t, "tron_mode")
+	if got := (wizardModel{choiceCursor: 0}).fieldPreview(modeField); !strings.Contains(got, "prefix:ABC") {
+		t.Fatalf("prefix preview = %q, want it to mention prefix:ABC", got)
+	}
+	if got := (wizardModel{choiceCursor: 1}).fieldPreview(modeField); !strings.Contains(got, "suffix:xyz") {
+		t.Fatalf("suffix preview = %q, want it to mention suffix:xyz", got)
+	}
+}
+
+func TestWizardLiveStatusValidatesTronInput(t *testing.T) {
+	prefixField := tronFieldByKey(t, "tron_prefix_value")
+	var m wizardModel
+	if s := m.liveStatus(prefixField, ""); s != "" {
+		t.Fatalf("empty input status = %q, want empty", s)
+	}
+	if s := m.liveStatus(prefixField, "AB"); s != "" {
+		t.Fatalf("valid input status = %q, want empty", s)
+	}
+	if s := m.liveStatus(prefixField, "0"); s == "" {
+		t.Fatal("invalid base58 input should produce a status")
+	}
+	if s := m.liveStatus(prefixField, "z"); s == "" {
+		t.Fatal("unreachable prefix should produce a status")
+	}
+
+	suffixField := tronFieldByKey(t, "tron_suffix_value")
+	if s := m.liveStatus(suffixField, "abcdefghi"); s == "" {
+		t.Fatal("over-long suffix should produce a status")
+	}
 }

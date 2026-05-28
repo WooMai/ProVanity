@@ -81,7 +81,7 @@ func newCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&f.mode, "mode", "evm", "wallet mode: evm or tron")
-	cmd.Flags().StringVar(&f.pattern, "pattern", "", "vanity pattern for selected mode; for example pattern:dead, leading:0:4, or pattern:TABC with --mode tron")
+	cmd.Flags().StringVar(&f.pattern, "pattern", "", "vanity pattern for selected mode; for example pattern:dead, leading:0:4, or prefix:ABC / suffix:xyz with --mode tron")
 	cmd.Flags().StringVar(&f.devices, "devices", "all", "comma-separated CUDA device ids or all")
 	cmd.Flags().IntVarP(&f.batchMultiple, "batch-multiple", "B", 0, "advanced raw GPU batch size; omit for profile/autotune")
 	cmd.Flags().IntVar(&f.workSize, "work-size", 0, "CUDA threads per block; omit for profile/autotune")

@@ -1,8 +1,11 @@
 package vanity
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/woomai/provanity/internal/crypto"
 )
 
 func TestParsePatternWithWildcards(t *testing.T) {
@@ -74,46 +77,125 @@ func TestParseLeadingPattern(t *testing.T) {
 	}
 }
 
-func TestParseTronPattern(t *testing.T) {
-	pattern, err := ParseTronPattern("pattern:TAB?*xX")
+func TestParseTronPrefix(t *testing.T) {
+	pattern, err := ParseTronPattern("prefix:AB")
 	if err != nil {
 		t.Fatalf("ParseTronPattern() error = %v", err)
 	}
-
-	if pattern.Kind != PatternTronPattern {
+	if pattern.Kind != PatternTronPrefix {
 		t.Fatalf("kind = %q", pattern.Kind)
 	}
-	if pattern.String() != "pattern:TAB??xX" {
+	if pattern.Value != "TAB" {
+		t.Fatalf("value = %q, want TAB", pattern.Value)
+	}
+	if pattern.String() != "prefix:AB" {
 		t.Fatalf("description = %q", pattern.String())
 	}
-	if pattern.TargetScore() != 4 {
-		t.Fatalf("target score = %d", pattern.TargetScore())
+	if pattern.TargetScore() != 2 {
+		t.Fatalf("target score = %d, want 2", pattern.TargetScore())
 	}
-	if !pattern.MatchesAddress("TAB12xX000000000000000000000000000") {
-		t.Fatal("Tron pattern did not match wildcard address")
+	if !pattern.MatchesAddress("TAB12000000000000000000000000000000") {
+		t.Fatal("Tron prefix did not match address")
 	}
-	if pattern.MatchesAddress("TAB12xY000000000000000000000000000") {
-		t.Fatal("Tron pattern matched wrong concrete character")
+	if pattern.MatchesAddress("TAC12000000000000000000000000000000") {
+		t.Fatal("Tron prefix matched wrong character")
 	}
-	if got := pattern.ScoreAddress("TAB12xY000000000000000000000000000"); got != 3 {
-		t.Fatalf("Tron score = %d, want 3", got)
+	// Longest leading run after T: "TAX..." matches only 'A'.
+	if got := pattern.ScoreAddress("TAX12000000000000000000000000000000"); got != 1 {
+		t.Fatalf("prefix score = %d, want 1", got)
+	}
+	if got := pattern.ScoreAddress("TAB12000000000000000000000000000000"); got != 2 {
+		t.Fatalf("prefix score = %d, want 2", got)
+	}
+}
+
+func TestParseTronPrefixStripsImplicitT(t *testing.T) {
+	withT, err := ParseTronPattern("prefix:TAB")
+	if err != nil {
+		t.Fatalf("ParseTronPattern(prefix:TAB) error = %v", err)
+	}
+	if withT.Value != "TAB" || withT.Count != 2 {
+		t.Fatalf("prefix:TAB -> value %q count %d, want TAB/2", withT.Value, withT.Count)
+	}
+}
+
+func TestParseTronSuffix(t *testing.T) {
+	pattern, err := ParseTronPattern("suffix:xyz")
+	if err != nil {
+		t.Fatalf("ParseTronPattern() error = %v", err)
+	}
+	if pattern.Kind != PatternTronSuffix {
+		t.Fatalf("kind = %q", pattern.Kind)
+	}
+	if pattern.Value != "xyz" || pattern.Count != 3 {
+		t.Fatalf("value/count = %q/%d, want xyz/3", pattern.Value, pattern.Count)
+	}
+	if pattern.String() != "suffix:xyz" {
+		t.Fatalf("description = %q", pattern.String())
+	}
+	if !pattern.MatchesAddress("T00000000000000000000000000000xyz") {
+		t.Fatal("Tron suffix did not match address")
+	}
+	if pattern.MatchesAddress("T00000000000000000000000000000xyw") {
+		t.Fatal("Tron suffix matched wrong trailing character")
+	}
+	// Longest trailing run: "...ayz" matches "yz" but not the 'x'.
+	if got := pattern.ScoreAddress("T00000000000000000000000000000ayz"); got != 2 {
+		t.Fatalf("suffix score = %d, want 2", got)
+	}
+	if got := pattern.ScoreAddress("T00000000000000000000000000000xyz"); got != 3 {
+		t.Fatalf("suffix score = %d, want 3", got)
 	}
 }
 
 func TestParseTronPatternRejectsInvalidValues(t *testing.T) {
 	for _, raw := range []string{
 		"leading:T:2",
-		"pattern:",
-		"pattern:A",
-		"pattern:T",
-		"pattern:T0",
-		"pattern:TO",
-		"pattern:Tl",
-		"pattern:" + "T" + strings.Repeat("a", 34),
+		"pattern:TAB",
+		"prefix:",
+		"prefix:T",
+		"prefix:0",
+		"prefix:O",
+		"prefix:l",
+		"suffix:",
+		"suffix:0",
+		"suffix:O",
+		"prefix:" + strings.Repeat("a", MaxTronConcretePos+1),
+		"suffix:" + strings.Repeat("a", MaxTronSuffixLen+1),
 	} {
 		if _, err := ParseTronPattern(raw); err == nil {
 			t.Fatalf("ParseTronPattern(%q) succeeded, want error", raw)
 		}
+	}
+}
+
+func TestParseTronPrefixRejectsUnreachable(t *testing.T) {
+	// "T1..." sorts below the smallest Tron address (2nd char floor is '9');
+	// "Tz..." sorts above the largest (2nd char ceiling is 'Z').
+	for _, raw := range []string{"prefix:1abc", "prefix:z", "prefix:2zz"} {
+		if _, err := ParseTronPattern(raw); err == nil {
+			t.Fatalf("ParseTronPattern(%q) succeeded, want unreachable-prefix error", raw)
+		}
+	}
+}
+
+func TestTronAddressRangeConstants(t *testing.T) {
+	min, err := crypto.TronAddressFromEVMAddress(make([]byte, crypto.AddressSize))
+	if err != nil {
+		t.Fatalf("TronAddressFromEVMAddress(zero) error = %v", err)
+	}
+	max, err := crypto.TronAddressFromEVMAddress(bytes.Repeat([]byte{0xff}, crypto.AddressSize))
+	if err != nil {
+		t.Fatalf("TronAddressFromEVMAddress(0xff) error = %v", err)
+	}
+	if min != tronAddrMin {
+		t.Fatalf("tronAddrMin = %q, want %q", tronAddrMin, min)
+	}
+	if max != tronAddrMax {
+		t.Fatalf("tronAddrMax = %q, want %q", tronAddrMax, max)
+	}
+	if len(tronAddrMin) != tronAddrLen || len(tronAddrMax) != tronAddrLen {
+		t.Fatalf("tron address range constants must be %d chars", tronAddrLen)
 	}
 }
 

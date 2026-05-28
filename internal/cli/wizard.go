@@ -287,7 +287,27 @@ func (m wizardModel) updateFieldKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	// Validate as the user types so an invalid format is flagged immediately;
+	// Enter stays blocked until it parses (see the "enter" case above).
+	m.status = m.liveStatus(field, m.input)
 	return m, nil
+}
+
+// liveStatus returns the validation error for the in-progress text input, or ""
+// when the value is empty (nothing to flag yet) or valid. It reuses the same
+// check Enter runs, so the live message matches the one that blocks advancing.
+func (m wizardModel) liveStatus(field wizardField, input string) string {
+	if field.kind != wizardFieldText {
+		return ""
+	}
+	value := strings.TrimSpace(input)
+	if value == "" {
+		return ""
+	}
+	if err := validateWizardField(field, value); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 func (m *wizardModel) finish() {
@@ -488,15 +508,35 @@ func (m wizardModel) fieldPreview(field wizardField) string {
 		}
 		leading := valueOrDefault(m.values, "pattern_leading_hex", "0")
 		return fmt.Sprintf("Result example: --pattern leading:%s:%s -> 0x%s...", leading, count, repeatedLeadingPreview(leading, count))
-	case "tron_pattern_value":
+	case "tron_prefix_value":
 		value := strings.TrimSpace(m.input)
 		if value == "" {
 			value = field.defaultValue
 		}
-		if pattern, err := vanity.ParseTronPattern("pattern:" + value); err == nil {
-			value = strings.TrimPrefix(pattern.String(), "pattern:")
+		if pattern, err := vanity.ParseTronPattern("prefix:" + value); err == nil {
+			value = strings.TrimPrefix(pattern.String(), "prefix:")
 		}
-		return fmt.Sprintf("Result example: --pattern pattern:%s -> %s...", value, value)
+		return fmt.Sprintf("Result example: --pattern prefix:%s -> T%s...", value, value)
+	case "tron_suffix_value":
+		value := strings.TrimSpace(m.input)
+		if value == "" {
+			value = field.defaultValue
+		}
+		if pattern, err := vanity.ParseTronPattern("suffix:" + value); err == nil {
+			value = strings.TrimPrefix(pattern.String(), "suffix:")
+		}
+		return fmt.Sprintf("Result example: --pattern suffix:%s -> ...%s", value, value)
+	case "tron_mode":
+		// Live example for the highlighted choice so the difference between
+		// prefix and suffix is obvious before picking one.
+		mode := "prefix"
+		if m.choiceCursor >= 0 && m.choiceCursor < len(field.choices) {
+			mode = field.choices[m.choiceCursor].key
+		}
+		if mode == "suffix" {
+			return "Result example: --pattern suffix:xyz -> address ends ...xyz"
+		}
+		return "Result example: --pattern prefix:ABC -> address starts TABC..."
 	default:
 		return ""
 	}
@@ -652,7 +692,12 @@ func wizardFields(mode string) []wizardField {
 
 func tronPatternFields() []wizardField {
 	return []wizardField{
-		placeholderTextField("tron_pattern_value", "Tron pattern", "TABC", validateTronPatternValue, nil, "Base58 pattern starting with T. Use * or ? as wildcards.", false),
+		choiceFieldWithDescription("tron_mode", "Tron match mode", "prefix", "Match the start or the end of the address.", []wizardChoice{
+			{key: "prefix", label: "Prefix mode", description: "Characters right after the leading T — e.g. prefix:ABC -> TABC…"},
+			{key: "suffix", label: "Suffix mode", description: "Trailing characters of the address — e.g. suffix:xyz -> …xyz"},
+		}),
+		placeholderTextField("tron_prefix_value", "Prefix value", "ABC", validateTronPrefixValue, valueIs("tron_mode", "prefix"), fmt.Sprintf("1–%d Base58 characters after the implicit leading T.", vanity.MaxTronConcretePos), false),
+		placeholderTextField("tron_suffix_value", "Suffix value", "xyz", validateTronSuffixValue, valueIs("tron_mode", "suffix"), fmt.Sprintf("1–%d trailing Base58 characters.", vanity.MaxTronSuffixLen), false),
 	}
 }
 
@@ -757,8 +802,13 @@ func validatePatternValue(value string) error {
 	return err
 }
 
-func validateTronPatternValue(value string) error {
-	_, err := vanity.ParseTronPattern("pattern:" + strings.TrimSpace(value))
+func validateTronPrefixValue(value string) error {
+	_, err := vanity.ParseTronPattern("prefix:" + strings.TrimSpace(value))
+	return err
+}
+
+func validateTronSuffixValue(value string) error {
+	_, err := vanity.ParseTronPattern("suffix:" + strings.TrimSpace(value))
 	return err
 }
 
@@ -845,7 +895,13 @@ func resolveWizardTronPattern(values map[string]string) (string, error) {
 		return pattern.String(), nil
 	}
 
-	raw := "pattern:" + strings.TrimSpace(valueOrDefault(values, "tron_pattern_value", "TABC"))
+	var raw string
+	switch valueOrDefault(values, "tron_mode", "prefix") {
+	case "suffix":
+		raw = "suffix:" + strings.TrimSpace(valueOrDefault(values, "tron_suffix_value", "xyz"))
+	default:
+		raw = "prefix:" + strings.TrimSpace(valueOrDefault(values, "tron_prefix_value", "ABC"))
+	}
 	pattern, err := vanity.ParseTronPattern(raw)
 	if err != nil {
 		return "", err

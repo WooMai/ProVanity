@@ -47,7 +47,7 @@ provanity-worker --pattern leading:0:8
 Generate a Tron vanity wallet:
 
 ```bash
-provanity-worker --mode tron --pattern pattern:TABC
+provanity-worker --mode tron --pattern prefix:ABC   # or suffix:xyz
 ```
 
 Run on specific CUDA devices:
@@ -165,7 +165,7 @@ Examples:
 ```bash
 provanity-worker --pattern pattern:deadXXXXbeef
 provanity-worker --pattern leading:0:8
-provanity-worker --mode tron --pattern pattern:TABC
+provanity-worker --mode tron --pattern prefix:ABC   # or suffix:xyz
 ```
 
 ## Output

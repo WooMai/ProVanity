@@ -5,9 +5,102 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 )
 
 const tronVersion byte = 0x41
+
+// tronAddressLen is the fixed length of a Tron base58check address. The 21-byte
+// payload (0x41 || 20-byte address) plus 4-byte checksum always encodes to 34
+// base58 characters because the leading 0x41 keeps the value above 58^33.
+const tronAddressLen = 34
+
+// tronAddrSpace is 2^(8*AddressSize) = the exclusive upper bound of the 20-byte
+// EVM address integer space.
+var tronAddrSpace = new(big.Int).Lsh(big.NewInt(1), 8*AddressSize)
+
+// TronPrefixAddressRange returns the inclusive range [lo, hi] of 20-byte EVM
+// addresses whose Tron base58check address begins with prefix (which must start
+// with 'T'). base58check(0x41||addr) is strictly increasing in addr —
+// incrementing addr adds 2^32 to the encoded integer while the 4-byte checksum
+// can only drop by at most 2^32-1, so the value still rises — so the matching
+// addresses form one contiguous interval, found by binary search. ok is false
+// when no Tron address can carry the prefix (it sorts outside [min, max]).
+//
+// This lets the CUDA backend match a Tron vanity prefix with a 160-bit integer
+// range compare per candidate instead of a full base58 encode (see
+// PROVANITY_CUDA_MODE_TRON_RANGE), with the exact base58check recomputed here on
+// the CPU only for the rare candidate that lands in range.
+func TronPrefixAddressRange(prefix string) (lo, hi [AddressSize]byte, ok bool) {
+	m := len(prefix)
+	if m == 0 || m > tronAddressLen {
+		return lo, hi, false
+	}
+	cmpPrefix := func(x *big.Int) int {
+		addr := bigToAddress(x)
+		s, err := TronAddressFromEVMAddress(addr[:])
+		if err != nil {
+			panic(err) // addr is always AddressSize bytes, so this cannot fail
+		}
+		return strings.Compare(s[:m], prefix)
+	}
+	loAddr := tronLowerBound(func(x *big.Int) bool { return cmpPrefix(x) >= 0 })
+	if loAddr.Cmp(tronAddrSpace) == 0 || cmpPrefix(loAddr) != 0 {
+		return lo, hi, false
+	}
+	hiExcl := tronLowerBound(func(x *big.Int) bool { return cmpPrefix(x) > 0 })
+	hiAddr := new(big.Int).Sub(hiExcl, big.NewInt(1))
+	return bigToAddress(loAddr), bigToAddress(hiAddr), true
+}
+
+// TronPrefixLadder returns nested [lo, hi] address intervals, one per prefix
+// length. prefix must be the implicit leading 'T' followed by the concrete
+// prefix characters (e.g. "TABC"); level j (0-based) is the interval of 20-byte
+// addresses whose Tron base58check address shares the first j+1 characters
+// after 'T' — i.e. matches prefix[:j+2]. Because base58check is strictly
+// increasing in the address, level j+1 ⊆ level j, so the CUDA scorer can report
+// "matched character count" as the depth of the deepest interval that contains
+// a candidate. los[j]/his[j] therefore have ascending lo and descending hi. ok
+// is false if prefix is malformed or any level is unreachable.
+func TronPrefixLadder(prefix string) (los, his [][AddressSize]byte, ok bool) {
+	if len(prefix) < 2 || prefix[0] != 'T' {
+		return nil, nil, false
+	}
+	for k := 2; k <= len(prefix); k++ {
+		lo, hi, reachable := TronPrefixAddressRange(prefix[:k])
+		if !reachable {
+			return nil, nil, false
+		}
+		los = append(los, lo)
+		his = append(his, hi)
+	}
+	return los, his, true
+}
+
+// tronLowerBound returns the smallest x in [0, tronAddrSpace) for which pred is
+// true, assuming pred is monotonic (all-false then all-true). Returns
+// tronAddrSpace if pred is never true.
+func tronLowerBound(pred func(*big.Int) bool) *big.Int {
+	lo := big.NewInt(0)
+	hi := new(big.Int).Set(tronAddrSpace)
+	for lo.Cmp(hi) < 0 {
+		mid := new(big.Int).Add(lo, hi)
+		mid.Rsh(mid, 1)
+		if pred(mid) {
+			hi = mid
+		} else {
+			lo.Add(mid, big.NewInt(1))
+		}
+	}
+	return lo
+}
+
+func bigToAddress(x *big.Int) [AddressSize]byte {
+	var out [AddressSize]byte
+	x.FillBytes(out[:]) // big-endian, left-padded
+	return out
+}
 
 var base58Alphabet = []byte("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 
@@ -108,6 +201,10 @@ func base58Decode(encoded string) ([]byte, error) {
 	copy(result[zeroes:], decoded)
 	return result, nil
 }
+
+// Base58Index returns the value (0..57) of a base58 character in the
+// Tron/Bitcoin alphabet, or -1 if ch is not a base58 character.
+func Base58Index(ch byte) int { return base58Index(ch) }
 
 func base58Index(ch byte) int {
 	for i, a := range base58Alphabet {

@@ -2,7 +2,7 @@
 
 #include "point.cuh"
 #include "keccak.cuh"
-#include "base58.cuh"
+#include "sha256.cuh"
 #include "secp256k1_tables.hpp"
 
 #define CUDA_KERNEL_BOUNDS __launch_bounds__(256, 2)
@@ -505,27 +505,105 @@ __global__ void CUDA_KERNEL_BOUNDS pv_score_pattern(Felt256 *__restrict__ const 
 	pv_publish_candidate(id, &hash, result, score, score_max);
 }
 
-/* Positional Tron base58 pattern: position 0 is implicitly 'T' and not
- * scored; positions 1..33 contribute one point each when g_pattern[i] is
- * non-zero and matches the derived base58 character. */
-__global__ void CUDA_KERNEL_BOUNDS pv_score_tron(Felt256 *__restrict__ const hashes, Result *__restrict__ const result, const uint8_t score_max)
+/* True when the 20-byte address is within the inclusive big-endian bounds of
+ * ladder level `level` (lo at g_tron_prefix_ladder[level*40 .. +19], hi at
+ * +20 .. +39). Byte 0 is most significant; the running cmp_* hold the first
+ * non-equal comparison's sign. */
+__device__ __forceinline__ bool pv_addr_in_level(const Hash20Words *const hash, const int level)
+{
+	const uint8_t *const lo = &g_tron_prefix_ladder[level * 40];
+	const uint8_t *const hi = &g_tron_prefix_ladder[level * 40 + 20];
+	int cmp_lo = 0;
+	int cmp_hi = 0;
+#pragma unroll
+	for (int i = 0; i < 20; ++i)
+	{
+		const uint8_t a = pv_hash20_byte(hash, i);
+		if (cmp_lo == 0)
+		{
+			cmp_lo = (a < lo[i]) ? -1 : (a > lo[i]) ? 1 : 0;
+		}
+		if (cmp_hi == 0)
+		{
+			cmp_hi = (a < hi[i]) ? -1 : (a > hi[i]) ? 1 : 0;
+		}
+	}
+	return cmp_lo >= 0 && cmp_hi <= 0;
+}
+
+/* Tron prefix score: the depth of the deepest nested interval that contains the
+ * address (= number of matched characters after the implicit 'T'). The ladder
+ * intervals are nested, so scanning from the deepest level down and returning
+ * the first containing level yields the matched-character count. No base58, no
+ * SHA-256 -- just up to g_tron_prefix_levels 160-bit compares. */
+__device__ __forceinline__ int pv_tron_prefix_depth(const Hash20Words *const hash)
+{
+	const int levels = static_cast<int>(g_tron_prefix_levels);
+	for (int j = levels; j >= 1; --j)
+	{
+		if (pv_addr_in_level(hash, j - 1))
+		{
+			return j;
+		}
+	}
+	return 0;
+}
+
+__global__ void CUDA_KERNEL_BOUNDS pv_score_tron_prefix(Felt256 *__restrict__ const hashes, Result *__restrict__ const result, const uint8_t score_max)
 {
 	const size_t id = blockIdx.x * blockDim.x + threadIdx.x;
 	const Hash20Words hash = pv_load_hash20(hashes, id);
-	uint8_t hash_bytes[20];
-	uint8_t address[34];
+	const int score = pv_tron_prefix_depth(&hash);
+	pv_publish_candidate(id, &hash, result, score, score_max);
+}
 
-	pv_store_hash20(hash_bytes, &hash);
-	pv_tron_base58check(hash_bytes, address);
+/* Tron suffix score: the length of the longest trailing run that matches the
+ * target. The suffix is checksum-dependent, so we compute the real base58check
+ * checksum (SHA-256 twice over 0x41||address), then reduce the 25-byte payload
+ * modulo g_tron_suffix_mod (= 58^len) to recover the trailing base58 digits.
+ * No big-number base58 division -- one 64-bit Horner reduction over 25 bytes. */
+__device__ __forceinline__ int pv_tron_suffix_depth(const Hash20Words *const hash)
+{
+	uint8_t payload[25];
+	payload[0] = 0x41;
+	pv_store_hash20(&payload[1], hash);
 
-	int score = 0;
+	uint8_t digest[32];
+	pv_sha256(payload, 21, digest);
+	pv_sha256(digest, 32, digest);
+	payload[21] = digest[0];
+	payload[22] = digest[1];
+	payload[23] = digest[2];
+	payload[24] = digest[3];
+
+	const uint64_t mod = g_tron_suffix_mod;
+	uint64_t r = 0;
 #pragma unroll
-	for (int i = 1; i < 34; ++i)
+	for (int i = 0; i < 25; ++i)
 	{
-		const uint8_t want = g_pattern[i];
-		score += (want != 0 && address[i] == want) ? 1 : 0;
+		r = (r * 256ULL + static_cast<uint64_t>(payload[i])) % mod;
 	}
 
+	const int n = static_cast<int>(g_tron_suffix_len);
+	int score = 0;
+	for (int i = 0; i < n; ++i)
+	{
+		const uint8_t digit = static_cast<uint8_t>(r % 58ULL);
+		r /= 58ULL;
+		if (digit != g_tron_suffix_digits[i])
+		{
+			break;
+		}
+		++score;
+	}
+	return score;
+}
+
+__global__ void CUDA_KERNEL_BOUNDS pv_score_tron_suffix(Felt256 *__restrict__ const hashes, Result *__restrict__ const result, const uint8_t score_max)
+{
+	const size_t id = blockIdx.x * blockDim.x + threadIdx.x;
+	const Hash20Words hash = pv_load_hash20(hashes, id);
+	const int score = pv_tron_suffix_depth(&hash);
 	pv_publish_candidate(id, &hash, result, score, score_max);
 }
 
@@ -582,22 +660,19 @@ struct ScoreOpPattern
 	}
 };
 
-struct ScoreOpTron
+struct ScoreOpTronPrefix
 {
 	__device__ __forceinline__ static int compute(const Hash20Words *const hash)
 	{
-		uint8_t hash_bytes[20];
-		uint8_t address[34];
-		pv_store_hash20(hash_bytes, hash);
-		pv_tron_base58check(hash_bytes, address);
-		int score = 0;
-#pragma unroll
-		for (int i = 1; i < 34; ++i)
-		{
-			const uint8_t want = g_pattern[i];
-			score += (want != 0 && address[i] == want) ? 1 : 0;
-		}
-		return score;
+		return pv_tron_prefix_depth(hash);
+	}
+};
+
+struct ScoreOpTronSuffix
+{
+	__device__ __forceinline__ static int compute(const Hash20Words *const hash)
+	{
+		return pv_tron_suffix_depth(hash);
 	}
 };
 

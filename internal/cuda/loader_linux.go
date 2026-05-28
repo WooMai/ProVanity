@@ -521,6 +521,15 @@ func toCUDAConfig(cfg Config) (C.provanity_cuda_config, *C.char, error) {
 		}
 		raw.device_ids[i] = C.int32_t(id)
 	}
+	raw.tron_suffix_mod = C.uint64_t(cfg.TronSuffixMod)
+	raw.tron_prefix_levels = C.uint8_t(cfg.TronPrefixLevels)
+	raw.tron_suffix_len = C.uint8_t(cfg.TronSuffixLen)
+	for i, value := range cfg.TronSuffixDigits {
+		raw.tron_suffix_digits[i] = C.uint8_t(value)
+	}
+	for i, value := range cfg.TronPrefixLadder {
+		raw.tron_prefix_ladder[i] = C.uint8_t(value)
+	}
 	return raw, publicKey, nil
 }
 

@@ -1,6 +1,7 @@
 package local
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,6 +14,83 @@ import (
 	"github.com/woomai/provanity/internal/gpu"
 	"github.com/woomai/provanity/internal/vanity"
 )
+
+func TestCudaConfigTronPrefix(t *testing.T) {
+	keypair, err := provanitycrypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	pat, err := vanity.ParseTronPattern("prefix:AB")
+	if err != nil {
+		t.Fatalf("ParseTronPattern: %v", err)
+	}
+	cfg, err := cudaConfig(Options{Wallet: WalletTron, Pattern: pat}, keypair)
+	if err != nil {
+		t.Fatalf("cudaConfig: %v", err)
+	}
+	if cfg.Mode != cuda.ModeTronPrefix {
+		t.Fatalf("mode = %d, want ModeTronPrefix", cfg.Mode)
+	}
+	los, his, ok := provanitycrypto.TronPrefixLadder("TAB")
+	if !ok {
+		t.Fatal("TronPrefixLadder(TAB) unreachable")
+	}
+	if int(cfg.TronPrefixLevels) != len(los) || len(los) != pat.TargetScore() {
+		t.Fatalf("levels = %d, ladder = %d, target = %d", cfg.TronPrefixLevels, len(los), pat.TargetScore())
+	}
+	for j := range los {
+		off := j * 2 * provanitycrypto.AddressSize
+		if !bytes.Equal(cfg.TronPrefixLadder[off:off+provanitycrypto.AddressSize], los[j][:]) {
+			t.Fatalf("level %d lo bound mismatch", j)
+		}
+		if !bytes.Equal(cfg.TronPrefixLadder[off+provanitycrypto.AddressSize:off+2*provanitycrypto.AddressSize], his[j][:]) {
+			t.Fatalf("level %d hi bound mismatch", j)
+		}
+	}
+	if int(cfg.StopScore) != pat.TargetScore() {
+		t.Fatalf("StopScore = %d, want %d", cfg.StopScore, pat.TargetScore())
+	}
+}
+
+func TestCudaConfigTronSuffix(t *testing.T) {
+	keypair, err := provanitycrypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	pat, err := vanity.ParseTronPattern("suffix:xyz")
+	if err != nil {
+		t.Fatalf("ParseTronPattern: %v", err)
+	}
+	cfg, err := cudaConfig(Options{Wallet: WalletTron, Pattern: pat}, keypair)
+	if err != nil {
+		t.Fatalf("cudaConfig: %v", err)
+	}
+	if cfg.Mode != cuda.ModeTronSuffix {
+		t.Fatalf("mode = %d, want ModeTronSuffix", cfg.Mode)
+	}
+	if int(cfg.TronSuffixLen) != 3 {
+		t.Fatalf("suffix len = %d, want 3", cfg.TronSuffixLen)
+	}
+	if cfg.TronSuffixMod != 58*58*58 {
+		t.Fatalf("suffix mod = %d, want %d", cfg.TronSuffixMod, 58*58*58)
+	}
+	// digit[0] is the last character ('z'), then 'y', then 'x'.
+	wantDigits := []byte{
+		byte(provanitycrypto.Base58Index('z')),
+		byte(provanitycrypto.Base58Index('y')),
+		byte(provanitycrypto.Base58Index('x')),
+	}
+	for i, want := range wantDigits {
+		if cfg.TronSuffixDigits[i] != want {
+			t.Fatalf("digit[%d] = %d, want %d", i, cfg.TronSuffixDigits[i], want)
+		}
+	}
+	if int(cfg.StopScore) != pat.TargetScore() {
+		t.Fatalf("StopScore = %d, want %d", cfg.StopScore, pat.TargetScore())
+	}
+}
 
 func TestIsCUDAOOMError(t *testing.T) {
 	tests := []struct {
@@ -75,7 +153,7 @@ func TestFinalizeCUDAResultTronWallet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TronAddressFromEVMAddress: %v", err)
 	}
-	pattern, err := vanity.ParseTronPattern("pattern:" + tronAddress[:4])
+	pattern, err := vanity.ParseTronPattern("prefix:" + tronAddress[1:4])
 	if err != nil {
 		t.Fatalf("ParseTronPattern: %v", err)
 	}
@@ -140,31 +218,6 @@ func TestFinalizeCUDAResultRemoteMode(t *testing.T) {
 	}
 	if result.PublicKey != "0x"+hex.EncodeToString(publicKey) {
 		t.Fatalf("public key = %s, want 0x%x", result.PublicKey, publicKey)
-	}
-}
-
-func TestCUDAConfigTronPattern(t *testing.T) {
-	pattern, err := vanity.ParseTronPattern("pattern:TA?bX")
-	if err != nil {
-		t.Fatalf("ParseTronPattern: %v", err)
-	}
-	keypair, err := provanitycrypto.GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("GenerateKeyPair: %v", err)
-	}
-
-	cfg, err := cudaConfig(Options{Wallet: WalletTron, Pattern: pattern}, keypair)
-	if err != nil {
-		t.Fatalf("cudaConfig() error = %v", err)
-	}
-	if cfg.Mode != cuda.ModeTronPattern {
-		t.Fatalf("mode = %d, want %d", cfg.Mode, cuda.ModeTronPattern)
-	}
-	if cfg.Pattern[0] != 0 || cfg.Pattern[1] != 'A' || cfg.Pattern[2] != 0 || cfg.Pattern[3] != 'b' || cfg.Pattern[4] != 'X' {
-		t.Fatalf("Tron pattern = %#v", cfg.Pattern[:5])
-	}
-	if cfg.StopScore != byte(pattern.TargetScore()) {
-		t.Fatalf("stop score = %d, want %d", cfg.StopScore, pattern.TargetScore())
 	}
 }
 

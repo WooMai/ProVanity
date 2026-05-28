@@ -546,24 +546,50 @@ func cudaConfig(opts Options, keypair provanitycrypto.KeyPair) (cuda.Config, err
 		ProgressIntervalMS: uint32(opts.ProgressIntervalMS),
 	}
 	switch {
-	case opts.Wallet == WalletTron && opts.Pattern.Kind == vanity.PatternTronPattern:
-		cfg.Mode = cuda.ModeTronPattern
-		value := opts.Pattern.Value
-		limit := len(value)
-		if limit > cuda.PatternLen {
-			limit = cuda.PatternLen
+	case opts.Wallet == WalletTron && opts.Pattern.Kind == vanity.PatternTronPrefix:
+		// Each prefix length maps to a nested [lo,hi] address interval; the
+		// kernel reports the deepest interval that contains a candidate as the
+		// matched-character count (graded progress, no base58/SHA per candidate).
+		los, his, ok := provanitycrypto.TronPrefixLadder(opts.Pattern.Value)
+		if !ok || len(los) == 0 {
+			return cuda.Config{}, fmt.Errorf("Tron prefix %q is not a reachable address prefix", opts.Pattern.Value)
 		}
-		// Position 0 is implicitly 'T' and not scored on the device.
-		// Wildcards are stored as 0 so the kernel can mask them out.
-		for i := 1; i < limit; i++ {
-			if value[i] == '?' {
-				continue
-			}
-			cfg.Pattern[i] = value[i]
+		if len(los) > cuda.TronMaxPrefixLevels {
+			return cuda.Config{}, fmt.Errorf("Tron prefix has %d levels, exceeds %d", len(los), cuda.TronMaxPrefixLevels)
 		}
+		cfg.Mode = cuda.ModeTronPrefix
 		cfg.StopScore = byte(opts.Pattern.TargetScore())
+		cfg.TronPrefixLevels = byte(len(los))
+		for j := range los {
+			off := j * 2 * provanitycrypto.AddressSize
+			copy(cfg.TronPrefixLadder[off:off+provanitycrypto.AddressSize], los[j][:])
+			copy(cfg.TronPrefixLadder[off+provanitycrypto.AddressSize:off+2*provanitycrypto.AddressSize], his[j][:])
+		}
+	case opts.Wallet == WalletTron && opts.Pattern.Kind == vanity.PatternTronSuffix:
+		// The suffix is checksum-dependent, so the kernel computes the real
+		// base58check tail per candidate. We pass the target digit values
+		// (index 0 = last character) and the modulus 58^N used to extract the
+		// address tail via value mod 58^N.
+		value := opts.Pattern.Value
+		n := len(value)
+		if n == 0 || n > cuda.TronMaxSuffixLen {
+			return cuda.Config{}, fmt.Errorf("Tron suffix length %d is out of range (1..%d)", n, cuda.TronMaxSuffixLen)
+		}
+		cfg.Mode = cuda.ModeTronSuffix
+		cfg.StopScore = byte(opts.Pattern.TargetScore())
+		cfg.TronSuffixLen = byte(n)
+		mod := uint64(1)
+		for i := 0; i < n; i++ {
+			idx := provanitycrypto.Base58Index(value[n-1-i])
+			if idx < 0 {
+				return cuda.Config{}, fmt.Errorf("Tron suffix has invalid base58 character %q", value[n-1-i])
+			}
+			cfg.TronSuffixDigits[i] = byte(idx)
+			mod *= 58
+		}
+		cfg.TronSuffixMod = mod
 	case opts.Wallet == WalletTron:
-		return cuda.Config{}, fmt.Errorf("Tron only supports pattern mode")
+		return cuda.Config{}, fmt.Errorf("Tron only supports prefix or suffix mode")
 	case opts.Pattern.Kind == vanity.PatternPattern:
 		cfg.Mode = cuda.ModePattern
 		// Each nibble position is either a target value 0..15 or

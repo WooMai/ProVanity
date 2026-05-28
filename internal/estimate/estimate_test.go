@@ -27,7 +27,7 @@ func TestForPattern(t *testing.T) {
 }
 
 func TestForTronPattern(t *testing.T) {
-	pattern, err := vanity.ParseTronPattern("pattern:TAB")
+	pattern, err := vanity.ParseTronPattern("prefix:AB")
 	if err != nil {
 		t.Fatalf("ParseTronPattern: %v", err)
 	}

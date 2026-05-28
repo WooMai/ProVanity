@@ -47,6 +47,9 @@ type cudaEvent struct {
 	ErrorMessage [256]byte
 }
 
+// cudaConfig mirrors provanity_cuda_config byte-for-byte. TronSuffixMod is
+// placed while still 8-aligned (offset 136) so no interior padding is needed;
+// the trailing [5]byte rounds the struct to 800 bytes to match the C layout.
 type cudaConfig struct {
 	PublicKeyHex       uintptr
 	Mode               int32
@@ -57,8 +60,13 @@ type cudaConfig struct {
 	BatchMultiple      uint32
 	ProgressIntervalMS uint32
 	WorkSize           uint32
+	TronSuffixMod      uint64
 	StopScore          byte
-	_                  [7]byte
+	TronPrefixLevels   byte
+	TronSuffixLen      byte
+	TronSuffixDigits   [TronMaxSuffixLen]byte
+	TronPrefixLadder   [TronPrefixLadderLen]byte
+	_                  [5]byte
 }
 
 type cudaDLL struct {
@@ -170,7 +178,12 @@ func toCUDAConfig(cfg Config, publicKey *byte) (cudaConfig, error) {
 		BatchMultiple:      cfg.BatchMultiple,
 		ProgressIntervalMS: cfg.ProgressIntervalMS,
 		WorkSize:           cfg.WorkSize,
+		TronSuffixMod:      cfg.TronSuffixMod,
 		StopScore:          cfg.StopScore,
+		TronPrefixLevels:   cfg.TronPrefixLevels,
+		TronSuffixLen:      cfg.TronSuffixLen,
+		TronSuffixDigits:   cfg.TronSuffixDigits,
+		TronPrefixLadder:   cfg.TronPrefixLadder,
 	}
 	if cfg.Contract {
 		raw.Contract = 1
