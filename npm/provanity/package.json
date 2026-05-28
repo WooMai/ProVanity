@@ -1,6 +1,6 @@
 {
   "name": "provanity",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "EVM and Tron vanity wallet generator powered by CUDA",
   "license": "MIT",
   "author": "WooMai",
@@ -34,8 +34,8 @@
     "postinstall": "node install.js"
   },
   "optionalDependencies": {
-    "@provanity/cli-linux-x64": "1.0.0",
-    "@provanity/cli-win32-x64": "1.0.0"
+    "@provanity/cli-linux-x64": "1.1.0",
+    "@provanity/cli-win32-x64": "1.1.0"
   },
   "engines": {
     "node": ">=18"
