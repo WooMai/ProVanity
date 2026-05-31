@@ -24,6 +24,12 @@ type RunFunc func(context.Context, local.EmitFunc) (local.Result, error)
 type DashboardOptions struct {
 	Pattern string
 	Devices string
+	// TargetScore is the number of fixed characters the pattern requires and
+	// ScoreBase the address alphabet size (16 for hex, 58 for Base58). Together
+	// they drive the STATS "target" chance estimate, independent of any
+	// candidate found so far.
+	TargetScore int
+	ScoreBase   int
 }
 
 type dashboardDone struct {
@@ -81,7 +87,7 @@ func RunDashboard(ctx context.Context, opts DashboardOptions, run RunFunc) (loca
 	bar := progress.New(
 		progress.WithGradient(string(PinkColor()), string(AccentColor())),
 		progress.WithoutPercentage(),
-		progress.WithWidth(28),
+		progress.WithWidth(20),
 	)
 
 	model := dashboardModel{
@@ -178,12 +184,12 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		barWidth := m.width / 3
-		if barWidth < 18 {
-			barWidth = 18
+		barWidth := m.width / 4
+		if barWidth < 14 {
+			barWidth = 14
 		}
-		if barWidth > 36 {
-			barWidth = 36
+		if barWidth > 24 {
+			barWidth = 24
 		}
 		m.bar.Width = barWidth
 		return m, nil
@@ -222,10 +228,6 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
-	case progress.FrameMsg:
-		updated, cmd := m.bar.Update(msg)
-		m.bar = updated.(progress.Model)
 		return m, cmd
 	case eventMsg:
 		m.applyEvent(local.RunEvent(msg))
@@ -413,6 +415,9 @@ func (m dashboardModel) statsView(width int) string {
 		statsRow("elapsed", formatDuration(m.progress.ElapsedSec)),
 		statsRow("attempts", formatCount(m.progress.Attempts)),
 	}
+	if row, ok := m.targetChanceRow(); ok {
+		rows = append(rows, row)
+	}
 	if tuning := m.tuningStatsRows(); len(tuning) > 0 {
 		rows = append(rows, tuning...)
 	}
@@ -592,17 +597,6 @@ func (m dashboardModel) bestView(width int) string {
 	if luck := m.bestLuck(); luck != "" {
 		rows = append(rows, MutedStyle.Render(padRightTUI("luck", 10))+" "+StrongStyle.Render(luck))
 	}
-	if !isMatched {
-		scoreBase := 16
-		if m.result.Address != "" {
-			scoreBase = m.result.ScoreBase
-		} else if len(m.candidates) > 0 {
-			scoreBase = m.candidates[0].ScoreBase
-		}
-		if eta := m.nextScoreETA(bestElapsed, score, target, scoreBase); eta != "" {
-			rows = append(rows, eta)
-		}
-	}
 	return Panel("BEST", strings.Join(rows, "\n"), width, PinkColor())
 }
 
@@ -627,49 +621,48 @@ func (m dashboardModel) bestLuck() string {
 	return ""
 }
 
-func (m dashboardModel) nextScoreETA(bestElapsedSec uint64, score, target, scoreBase int) string {
-	if score <= 0 || m.progress.Hashrate == 0 {
-		return ""
+// targetChanceRow renders the STATS "target" entry: the chance of having matched
+// the full pattern, based on the target length and the current hashrate (not on
+// any candidate found so far). A 0→100% progress bar tracks the live cumulative
+// chance of a hit by now; the line beneath it forecasts the next laddered
+// milestone ("N% chance in <time>" through 25/50/75/90%) and, once past 90%,
+// states the live chance ("N% chance by now") that approaches but never reaches
+// 100%. The bool is false only when there is no target to estimate against.
+func (m dashboardModel) targetChanceRow() (string, bool) {
+	if m.opts.TargetScore <= 0 {
+		return "", false
 	}
-	if scoreBase <= 1 {
-		scoreBase = 16
+	label := MutedStyle.Render(padRightTUI("target", 10))
+	// While autotuning, the hashrate swings between probe candidates, so an
+	// estimate would jitter wildly; hold off until there is a real reading.
+	if m.isAutotuning() || m.progress.Hashrate == 0 {
+		return label + " " + DimStyle.Render("estimating…"), true
 	}
-	elapsedSinceBest := time.Duration(0)
-	if m.progress.ElapsedSec > bestElapsedSec {
-		elapsedSinceBest = time.Duration(m.progress.ElapsedSec-bestElapsedSec) * time.Second
+	base := m.opts.ScoreBase
+	if base <= 1 {
+		base = 16
 	}
-	next, err := estimate.ForNextScoreBase(score, scoreBase, float64(m.progress.Hashrate), elapsedSinceBest)
+	elapsed := time.Duration(m.progress.ElapsedSec) * time.Second
+	chance, err := estimate.ForTarget(m.opts.TargetScore, base, float64(m.progress.Hashrate), elapsed)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	var status string
-	if next.Overdue {
-		status = YellowStyle.Render("overdue")
-	} else {
-		status = StrongStyle.Render(estimate.FormatDuration(next.Remaining))
+	// Mark the estimate provisional while the hashrate is not finalized (baseline
+	// CUDA params), matching the "*" the current/peak/devices rows already use —
+	// the figure can improve once the speed settles.
+	marker := tuningMarker(m.progress.HashrateUncertain)
+	bar := m.bar.ViewAs(chance.Current)
+
+	// Past the final milestone the bar's live chance is the headline figure, so a
+	// single line suffices; the milestone ladder adds a forecast line beneath.
+	if chance.Reached {
+		text := estimate.FormatChance(chance.Probability) + " chance by now" + marker
+		return label + " " + bar + " " + StrongStyle.Bold(true).Render(text), true
 	}
-	ratio := 0.0
-	if !next.Overdue {
-		full := next.Total.Seconds()
-		if full > 0 {
-			ratio = 1 - next.Remaining.Seconds()/full
-			if ratio < 0 {
-				ratio = 0
-			}
-			if ratio > 1 {
-				ratio = 1
-			}
-		}
-	} else {
-		ratio = 1
-	}
-	if score >= target && target > 0 {
-		return ""
-	}
-	bar := m.bar.ViewAs(ratio)
-	scoreLabel := fmt.Sprintf("+1 score · %s", next.Quantile)
-	return MutedStyle.Render(padRightTUI("eta", 10)) + " " + bar + "\n" +
-		MutedStyle.Render(padRightTUI("", 10)) + " " + DimStyle.Render(scoreLabel) + "  " + status
+	line1 := label + " " + bar + " " + StrongStyle.Bold(true).Render(estimate.FormatChance(chance.Current))
+	forecast := fmt.Sprintf("%s chance in %s%s", estimate.FormatChance(chance.Probability), estimate.FormatDuration(chance.Remaining), marker)
+	line2 := MutedStyle.Render(padRightTUI("", 10)) + " " + DimStyle.Render(forecast)
+	return line1 + "\n" + line2, true
 }
 
 func (m dashboardModel) devicesView(width int) string {

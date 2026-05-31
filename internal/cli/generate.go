@@ -104,8 +104,10 @@ func runGenerate(cmd *cobra.Command, pattern, devices string, selectGPU bool, wa
 	}
 
 	result, err := tui.RunDashboard(runCtx, tui.DashboardOptions{
-		Pattern: parsedPattern.String(),
-		Devices: deviceLabel,
+		Pattern:     parsedPattern.String(),
+		Devices:     deviceLabel,
+		TargetScore: parsedPattern.TargetScore(),
+		ScoreBase:   patternScoreBase(wallet),
 	}, func(ctx context.Context, emit local.EmitFunc) (local.Result, error) {
 		return local.Run(ctx, opts, emit)
 	})
@@ -179,6 +181,16 @@ func formatScore(score, target int) string {
 
 func isTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// patternScoreBase is the address alphabet size for the wallet kind: Tron
+// addresses are Base58, EVM addresses are hex. It feeds the dashboard's
+// target-chance estimate.
+func patternScoreBase(wallet local.WalletKind) int {
+	if wallet == local.WalletTron {
+		return 58
+	}
+	return 16
 }
 
 func formatDeviceIDs(ids []int) string {
