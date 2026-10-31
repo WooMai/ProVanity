@@ -2,11 +2,7 @@ package local
 
 import (
 	"context"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -396,9 +392,6 @@ func runCUDAAttempt(ctx context.Context, opts Options, keypair provanitycrypto.K
 			if stopProgress != nil && stopProgress(e) {
 				return true
 			}
-		case gpu.PhaseEvent:
-			// Setup-lifecycle event; already forwarded via the unconditional
-			// emit above. No special handling needed here.
 		case gpu.FoundEvent:
 			address := candidateAddress(opts, e.Address)
 			score := scoreAddress(opts, address, e.Address)
@@ -471,11 +464,11 @@ func runCUDAAttempt(ctx context.Context, opts Options, keypair provanitycrypto.K
 				HashrateUncertain: state.HashrateUncertain,
 			}
 		}
-		partial, perr := finalizeCUDAResult(keypair, opts, *bestEvent, progress)
-		if perr == nil {
+		partial, finalizeErr := finalizeCUDAResult(keypair, opts, *bestEvent, progress)
+		if finalizeErr == nil {
 			partial.Partial = true
 			if opts.OutputPath != "" {
-				if werr := writeResult(opts.OutputPath, partial); werr == nil {
+				if writeErr := writeResult(opts.OutputPath, partial); writeErr == nil {
 					partial.OutputPath = opts.OutputPath
 				}
 			}
@@ -536,103 +529,6 @@ func normalizeWalletKind(kind WalletKind) WalletKind {
 	}
 }
 
-func cudaConfig(opts Options, keypair provanitycrypto.KeyPair) (cuda.Config, error) {
-	opts = withCompleteCUDAParams(opts)
-	cfg := cuda.Config{
-		PublicKeyHex:       hex.EncodeToString(keypair.PublicKey),
-		DeviceIDs:          append([]int(nil), opts.DeviceIDs...),
-		BatchMultiple:      uint32(opts.BatchMultiple),
-		WorkSize:           uint32(opts.WorkSize),
-		ProgressIntervalMS: uint32(opts.ProgressIntervalMS),
-	}
-	switch {
-	case opts.Wallet == WalletTron && opts.Pattern.Kind == vanity.PatternTronPrefix:
-		// Each prefix length maps to a nested [lo,hi] address interval; the
-		// kernel reports the deepest interval that contains a candidate as the
-		// matched-character count (graded progress, no base58/SHA per candidate).
-		los, his, ok := provanitycrypto.TronPrefixLadder(opts.Pattern.Value)
-		if !ok || len(los) == 0 {
-			return cuda.Config{}, fmt.Errorf("Tron prefix %q is not a reachable address prefix", opts.Pattern.Value)
-		}
-		if len(los) > cuda.TronMaxPrefixLevels {
-			return cuda.Config{}, fmt.Errorf("Tron prefix has %d levels, exceeds %d", len(los), cuda.TronMaxPrefixLevels)
-		}
-		cfg.Mode = cuda.ModeTronPrefix
-		cfg.StopScore = byte(opts.Pattern.TargetScore())
-		cfg.TronPrefixLevels = byte(len(los))
-		for j := range los {
-			off := j * 2 * provanitycrypto.AddressSize
-			copy(cfg.TronPrefixLadder[off:off+provanitycrypto.AddressSize], los[j][:])
-			copy(cfg.TronPrefixLadder[off+provanitycrypto.AddressSize:off+2*provanitycrypto.AddressSize], his[j][:])
-		}
-	case opts.Wallet == WalletTron && opts.Pattern.Kind == vanity.PatternTronSuffix:
-		// The suffix is checksum-dependent, so the kernel computes the real
-		// base58check tail per candidate. We pass the target digit values
-		// (index 0 = last character) and the modulus 58^N used to extract the
-		// address tail via value mod 58^N.
-		value := opts.Pattern.Value
-		n := len(value)
-		if n == 0 || n > cuda.TronMaxSuffixLen {
-			return cuda.Config{}, fmt.Errorf("Tron suffix length %d is out of range (1..%d)", n, cuda.TronMaxSuffixLen)
-		}
-		cfg.Mode = cuda.ModeTronSuffix
-		cfg.StopScore = byte(opts.Pattern.TargetScore())
-		cfg.TronSuffixLen = byte(n)
-		mod := uint64(1)
-		for i := 0; i < n; i++ {
-			idx := provanitycrypto.Base58Index(value[n-1-i])
-			if idx < 0 {
-				return cuda.Config{}, fmt.Errorf("Tron suffix has invalid base58 character %q", value[n-1-i])
-			}
-			cfg.TronSuffixDigits[i] = byte(idx)
-			mod *= 58
-		}
-		cfg.TronSuffixMod = mod
-	case opts.Wallet == WalletTron:
-		return cuda.Config{}, fmt.Errorf("Tron only supports prefix or suffix mode")
-	case opts.Pattern.Kind == vanity.PatternPattern:
-		cfg.Mode = cuda.ModePattern
-		// Each nibble position is either a target value 0..15 or
-		// cuda.PatternWildcard when the user wrote X / x / * / ?.
-		for i := range cfg.Pattern {
-			cfg.Pattern[i] = cuda.PatternWildcard
-		}
-		value := opts.Pattern.Value
-		limit := len(value)
-		if limit > cuda.PatternLen {
-			limit = cuda.PatternLen
-		}
-		for i := 0; i < limit; i++ {
-			n := hexNibbleNoError(value[i])
-			if n == 0xff {
-				continue
-			}
-			cfg.Pattern[i] = n
-		}
-		cfg.StopScore = byte(opts.Pattern.TargetScore())
-	case opts.Pattern.Kind == vanity.PatternLeading:
-		cfg.Mode = cuda.ModeLeading
-		cfg.Pattern[0] = hexNibbleNoError(opts.Pattern.Value[0])
-		cfg.StopScore = byte(opts.Pattern.TargetScore())
-	default:
-		return cuda.Config{}, fmt.Errorf("unsupported CUDA pattern kind %q", opts.Pattern.Kind)
-	}
-	return cfg, nil
-}
-
-func hexNibbleNoError(ch byte) byte {
-	switch {
-	case ch >= '0' && ch <= '9':
-		return ch - '0'
-	case ch >= 'a' && ch <= 'f':
-		return ch - 'a' + 10
-	case ch >= 'A' && ch <= 'F':
-		return ch - 'A' + 10
-	default:
-		return 0xff
-	}
-}
-
 func initialKeyPair(opts Options) (provanitycrypto.KeyPair, error) {
 	if opts.initialKeyPair != nil && len(opts.InitialPublicKey) > 0 {
 		return provanitycrypto.KeyPair{}, fmt.Errorf("initial private key and initial public key are mutually exclusive")
@@ -652,147 +548,4 @@ func initialKeyPair(opts Options) (provanitycrypto.KeyPair, error) {
 	keypair.PublicKey = append([]byte(nil), keypair.PublicKey...)
 	keypair.Address = append([]byte(nil), keypair.Address...)
 	return keypair, nil
-}
-
-func finalizeCUDAResult(keypair provanitycrypto.KeyPair, opts Options, found gpu.FoundEvent, progress gpu.ProgressEvent) (Result, error) {
-	offset, err := hex.DecodeString(found.Offset)
-	if err != nil {
-		return Result{}, fmt.Errorf("decode cuda offset: %w", err)
-	}
-	address, err := hex.DecodeString(found.Address)
-	if err != nil {
-		return Result{}, fmt.Errorf("decode cuda address: %w", err)
-	}
-	if len(keypair.PrivateKey) == 0 {
-		return remoteCUDAResult(keypair, opts, found, progress, offset, address)
-	}
-	finalized, err := provanitycrypto.Finalize(keypair.PrivateKey, offset, address)
-	if err != nil {
-		return Result{}, fmt.Errorf("finalize split key: %w", err)
-	}
-
-	hashrate := progress.Hashrate
-	if hashrate == 0 && found.ElapsedSec > 0 {
-		hashrate = found.Attempts / found.ElapsedSec
-	}
-
-	displayAddress, err := displayAddress(opts, finalized.Address)
-	if err != nil {
-		return Result{}, err
-	}
-
-	return Result{
-		Address:     displayAddress,
-		PrivateKey:  "0x" + hex.EncodeToString(finalized.PrivateKey),
-		PublicKey:   "0x" + hex.EncodeToString(finalized.PublicKey),
-		Offset:      "0x" + found.Offset,
-		Pattern:     opts.Pattern.String(),
-		Score:       scoreAddress(opts, displayAddress, hex.EncodeToString(finalized.Address)),
-		TargetScore: opts.Pattern.TargetScore(),
-		ScoreBase:   scoreBase(opts),
-		Stats: Stats{
-			ElapsedSec:        found.ElapsedSec,
-			Attempts:          found.Attempts,
-			Hashrate:          hashrate,
-			HashrateUncertain: progress.HashrateUncertain,
-		},
-	}, nil
-}
-
-func remoteCUDAResult(keypair provanitycrypto.KeyPair, opts Options, found gpu.FoundEvent, progress gpu.ProgressEvent, offset, address []byte) (Result, error) {
-	if len(offset) != provanitycrypto.PrivateKeySize {
-		return Result{}, fmt.Errorf("offset must be %d bytes", provanitycrypto.PrivateKeySize)
-	}
-	if len(address) != provanitycrypto.AddressSize {
-		return Result{}, fmt.Errorf("address must be %d bytes", provanitycrypto.AddressSize)
-	}
-
-	hashrate := progress.Hashrate
-	if hashrate == 0 && found.ElapsedSec > 0 {
-		hashrate = found.Attempts / found.ElapsedSec
-	}
-
-	publicKey := ""
-	if len(keypair.PublicKey) > 0 {
-		publicKey = "0x" + hex.EncodeToString(keypair.PublicKey)
-	}
-
-	displayAddress, err := displayAddress(opts, address)
-	if err != nil {
-		return Result{}, err
-	}
-
-	return Result{
-		Address:     displayAddress,
-		PublicKey:   publicKey,
-		Offset:      "0x" + hex.EncodeToString(offset),
-		Pattern:     opts.Pattern.String(),
-		Score:       scoreAddress(opts, displayAddress, hex.EncodeToString(address)),
-		TargetScore: opts.Pattern.TargetScore(),
-		ScoreBase:   scoreBase(opts),
-		Stats: Stats{
-			ElapsedSec:        found.ElapsedSec,
-			Attempts:          found.Attempts,
-			Hashrate:          hashrate,
-			HashrateUncertain: progress.HashrateUncertain,
-		},
-	}, nil
-}
-
-func writeResult(path string, result Result) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create result directory: %w", err)
-	}
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode result: %w", err)
-	}
-	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write plaintext result: %w", err)
-	}
-	return nil
-}
-
-func candidateAddress(opts Options, addressHex string) string {
-	if opts.Wallet != WalletTron {
-		return "0x" + strings.TrimPrefix(addressHex, "0x")
-	}
-	address, err := hex.DecodeString(strings.TrimPrefix(addressHex, "0x"))
-	if err != nil {
-		return addressHex
-	}
-	tronAddress, err := provanitycrypto.TronAddressFromEVMAddress(address)
-	if err != nil {
-		return addressHex
-	}
-	return tronAddress
-}
-
-func displayAddress(opts Options, address []byte) (string, error) {
-	if opts.Wallet == WalletTron {
-		return provanitycrypto.TronAddressFromEVMAddress(address)
-	}
-	return "0x" + hex.EncodeToString(address), nil
-}
-
-func scoreAddress(opts Options, display, evmHex string) int {
-	if opts.Wallet == WalletTron {
-		return opts.Pattern.ScoreAddress(display)
-	}
-	return opts.Pattern.ScoreAddressHex(evmHex)
-}
-
-func matchesAddress(opts Options, display, evmHex string) bool {
-	if opts.Wallet == WalletTron {
-		return opts.Pattern.MatchesAddress(display)
-	}
-	return opts.Pattern.MatchesAddressHex(evmHex)
-}
-
-func scoreBase(opts Options) int {
-	if opts.Wallet == WalletTron {
-		return 58
-	}
-	return 16
 }

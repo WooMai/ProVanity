@@ -72,7 +72,7 @@ func (s *wsServer) Broadcast(event map[string]any) {
 	clients := s.snapshotClients()
 	for _, client := range clients {
 		if err := client.sendEvent(event); err != nil {
-			client.close(websocket.StatusInternalError, "write failed")
+			client.close()
 		}
 	}
 }
@@ -95,7 +95,7 @@ func (s *wsServer) Close() {
 	cancel()
 
 	for _, client := range clients {
-		client.close(websocket.StatusNormalClosure, "worker stopped")
+		client.close()
 	}
 }
 
@@ -114,7 +114,7 @@ func (s *wsServer) accept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := client.sendEvent(baseEvent("subscribed")); err != nil {
-		client.close(websocket.StatusInternalError, "subscribe failed")
+		client.close()
 		return
 	}
 	go client.readLoop()
@@ -147,7 +147,7 @@ func (s *wsServer) snapshotClients() []*wsClient {
 }
 
 func (c *wsClient) readLoop() {
-	defer c.close(websocket.StatusNormalClosure, "client closed")
+	defer c.close()
 	for {
 		messageType, data, err := c.conn.Read(context.Background())
 		if err != nil {
@@ -155,7 +155,6 @@ func (c *wsClient) readLoop() {
 		}
 		plain, err := decodeWSFrame(c.server.key, messageType, data)
 		if err != nil {
-			c.close(websocket.StatusPolicyViolation, "decrypt failed")
 			return
 		}
 		c.handleCommand(plain)
@@ -178,8 +177,6 @@ func (c *wsClient) handleCommand(data []byte) {
 		}
 	case "ping":
 		_ = c.sendEvent(baseEvent("pong"))
-	case "":
-		_ = c.sendEvent(errorEvent("unknown command: "))
 	default:
 		_ = c.sendEvent(errorEvent("unknown command: " + command.Command))
 	}
@@ -198,7 +195,7 @@ func (c *wsClient) sendEvent(event map[string]any) error {
 	return c.conn.Write(ctx, messageType, data)
 }
 
-func (c *wsClient) close(code websocket.StatusCode, reason string) {
+func (c *wsClient) close() {
 	c.once.Do(func() {
 		c.server.removeClient(c)
 		_ = c.conn.CloseNow()
@@ -257,9 +254,5 @@ func decodeWSFrame(key []byte, messageType websocket.MessageType, data []byte) (
 	}
 	nonce := data[:wsNonceSize]
 	ciphertext := data[wsNonceSize:]
-	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, err
-	}
-	return plain, nil
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }

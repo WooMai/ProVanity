@@ -61,57 +61,46 @@ func Benchmark(ctx context.Context, opts BenchmarkOptions, emit BenchmarkEmitFun
 	if opts.Duration <= 0 {
 		return BenchmarkResult{}, fmt.Errorf("benchmark duration must be positive")
 	}
+
+	paramSource := "default"
+	var (
+		tuningDevice gpu.Device
+		samples      []TuningSample
+		tunedRate    uint64
+	)
 	if opts.ManualParams {
-		opts = completeBenchmarkCUDAParams(opts)
-		result, err := runBenchmarkFixed(ctx, opts, emit)
+		paramSource = "manual"
+	} else if device, ok := benchmarkTuningDevice(ctx, opts); ok {
+		params, tuningSamples, rate, selected, err := autotuneBenchmark(ctx, opts, device, emit)
 		if err != nil {
 			return BenchmarkResult{}, err
 		}
-		result.Params = CUDAParams{BatchMultiple: opts.BatchMultiple, WorkSize: opts.WorkSize}
-		result.ParamSource = "manual"
-		result.System = benchmarkSystemInfo(ctx)
-		return result, nil
+		samples = tuningSamples
+		if selected {
+			opts.BatchMultiple = params.BatchMultiple
+			opts.WorkSize = params.WorkSize
+			paramSource = "autotune"
+			tuningDevice = device
+			tunedRate = rate
+		}
+	} else {
+		params := completeCUDAParams(CUDAParams{BatchMultiple: opts.BatchMultiple, WorkSize: opts.WorkSize})
+		emitBenchmarkTuning(emit, TuningStateDefault, "", 0, 0, params, 0)
 	}
 
-	device, ok := benchmarkTuningDevice(ctx, opts)
-	if !ok {
-		opts = completeBenchmarkCUDAParams(opts)
-		emitBenchmarkTuning(emit, TuningStateDefault, "", 0, 0, CUDAParams{BatchMultiple: opts.BatchMultiple, WorkSize: opts.WorkSize}, 0)
-		result, err := runBenchmarkFixed(ctx, opts, emit)
-		if err != nil {
-			return BenchmarkResult{}, err
-		}
-		result.Params = CUDAParams{BatchMultiple: opts.BatchMultiple, WorkSize: opts.WorkSize}
-		result.ParamSource = "default"
-		result.System = benchmarkSystemInfo(ctx)
-		return result, nil
-	}
-	params, samples, rate, ok, err := autotuneBenchmark(ctx, opts, device, emit)
-	if err != nil {
-		return BenchmarkResult{}, err
-	}
-	if !ok {
-		opts = completeBenchmarkCUDAParams(opts)
-		result, err := runBenchmarkFixed(ctx, opts, emit)
-		if err != nil {
-			return BenchmarkResult{}, err
-		}
-		result.Params = CUDAParams{BatchMultiple: opts.BatchMultiple, WorkSize: opts.WorkSize}
-		result.ParamSource = "default"
-		result = attachBenchmarkTuning(result, samples)
-		result.System = benchmarkSystemInfo(ctx)
-		return result, nil
-	}
-	opts.BatchMultiple = params.BatchMultiple
-	opts.WorkSize = params.WorkSize
+	opts = completeBenchmarkCUDAParams(opts)
 	result, err := runBenchmarkFixed(ctx, opts, emit)
 	if err != nil {
 		return BenchmarkResult{}, err
 	}
-	saveCUDAProfile(device, params, rate)
-	result.Params = params
-	result.ParamSource = "autotune"
-	result = attachBenchmarkTuning(result, samples)
+	result.Params = CUDAParams{BatchMultiple: opts.BatchMultiple, WorkSize: opts.WorkSize}
+	result.ParamSource = paramSource
+	if paramSource == "autotune" {
+		saveCUDAProfile(tuningDevice, result.Params, tunedRate)
+	}
+	if samples != nil {
+		result = attachBenchmarkTuning(result, samples)
+	}
 	result.System = benchmarkSystemInfo(ctx)
 	return result, nil
 }
@@ -237,40 +226,32 @@ func autotuneBenchmark(ctx context.Context, opts BenchmarkOptions, device gpu.De
 			bestProbeHashrate = result.Hashrate
 		}
 	}
-	// Confirm round runs the top candidates to their full duration — these are
-	// already known to be near-best, no early-exit.
+	// Confirm each candidate in forward and reverse order to balance ordering
+	// effects. Run the full duration without early exit for both passes.
 	tuneOpts.AbandonBelow = 0
 	topParams := topTuningParams(samples, 3)
 	confirmTotal := len(topParams) * 2
 	confirmIndex := 0
-	for _, params := range topParams {
-		confirmIndex++
-		tuneOpts.BatchMultiple = params.BatchMultiple
-		tuneOpts.WorkSize = params.WorkSize
-		tuneOpts.Duration = 5 * time.Second
-		result, ok, err := runAutotuneSample(ctx, tuneOpts, emit, "confirm", confirmIndex, confirmTotal, params)
-		if err != nil {
-			return CUDAParams{}, samples, 0, false, err
+	for pass := 0; pass < 2; pass++ {
+		for i := range topParams {
+			candidateIndex := i
+			if pass == 1 {
+				candidateIndex = len(topParams) - 1 - i
+			}
+			params := topParams[candidateIndex]
+			confirmIndex++
+			tuneOpts.BatchMultiple = params.BatchMultiple
+			tuneOpts.WorkSize = params.WorkSize
+			tuneOpts.Duration = 5 * time.Second
+			result, ok, err := runAutotuneSample(ctx, tuneOpts, emit, "confirm", confirmIndex, confirmTotal, params)
+			if err != nil {
+				return CUDAParams{}, samples, 0, false, err
+			}
+			if !ok {
+				continue
+			}
+			samples = append(samples, TuningSample{Params: params, Hashrate: result.Hashrate, DurationSec: result.DurationSec, Round: "confirm"})
 		}
-		if !ok {
-			continue
-		}
-		samples = append(samples, TuningSample{Params: params, Hashrate: result.Hashrate, DurationSec: result.DurationSec, Round: "confirm"})
-	}
-	for i := len(topParams) - 1; i >= 0; i-- {
-		confirmIndex++
-		params := topParams[i]
-		tuneOpts.BatchMultiple = params.BatchMultiple
-		tuneOpts.WorkSize = params.WorkSize
-		tuneOpts.Duration = 5 * time.Second
-		result, ok, err := runAutotuneSample(ctx, tuneOpts, emit, "confirm", confirmIndex, confirmTotal, params)
-		if err != nil {
-			return CUDAParams{}, samples, 0, false, err
-		}
-		if !ok {
-			continue
-		}
-		samples = append(samples, TuningSample{Params: params, Hashrate: result.Hashrate, DurationSec: result.DurationSec, Round: "confirm"})
 	}
 	params, rate, ok := bestConfirmedTuningParams(samples)
 	if ok {
@@ -387,9 +368,8 @@ func benchmarkAutotuneEmitter(emit BenchmarkEmitFunc, phase string, index, total
 		return nil
 	}
 	return func(event BenchmarkEvent) {
-		// Forward the original GPU event so the live renderer keeps its
-		// attempts / hashrate gauges ticking during autotune probes — the
-		// work is real (kernel evaluates the user pattern too), not wasted.
+		// Forward GPU events so the live renderer updates attempts and hashrate
+		// during probes. Benchmark probes use an unreachable leading-nibble target.
 		if event.GPUEvent != nil {
 			emit(event)
 		}
@@ -473,4 +453,3 @@ func mergeBenchmarkDevices(readyDevices, progressDevices []gpu.Device) []gpu.Dev
 	}
 	return merged
 }
-
